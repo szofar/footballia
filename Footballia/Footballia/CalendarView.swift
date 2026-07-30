@@ -1,0 +1,256 @@
+import SwiftUI
+
+struct CalendarView: View {
+    @Environment(FootballiaService.self) private var service
+    @State private var selectedDay: Int? = nil
+    @State private var selectedMatch: Match? = nil
+
+    private var monthName: String {
+        let df = DateFormatter()
+        df.dateFormat = "MMMM"
+        var c = DateComponents()
+        c.year = service.calendarYear; c.month = service.calendarMonth; c.day = 1
+        let date = Calendar.current.date(from: c) ?? Date()
+        return df.string(from: date)
+    }
+
+    var body: some View {
+        ZStack {
+            VStack(spacing: 0) {
+                calendarHeader
+                ScrollView {
+                    VStack(spacing: 28) {
+                        monthGrid
+                            .padding(.horizontal, 28)
+                            .padding(.top, 24)
+
+                        if let day = selectedDay {
+                            matchesForDay(day)
+                                .padding(.horizontal, 28)
+                        } else {
+                            Text("Select a highlighted date to see its matches.")
+                                .font(.subheadline)
+                                .foregroundColor(.white.opacity(0.3))
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, 12)
+                        }
+
+                        Spacer(minLength: 28)
+                    }
+                }
+                .scrollIndicators(.hidden)
+            }
+
+            if let match = selectedMatch {
+                VideoPlayerOverlay(match: match) {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                        selectedMatch = nil
+                    }
+                }
+                .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .center)))
+                .zIndex(10)
+            }
+        }
+        .task { await service.loadCalendar() }
+    }
+
+    // MARK: - Header
+
+    private var calendarHeader: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Calendar")
+                    .font(.system(size: 26, weight: .bold))
+                    .foregroundColor(.white)
+                Text("Browse matches by date")
+                    .font(.subheadline)
+                    .foregroundColor(.white.opacity(0.35))
+            }
+
+            Spacer()
+
+            if service.isLoadingCalendar {
+                ProgressView().tint(.green).controlSize(.small)
+            }
+
+            HStack(spacing: 20) {
+                Button { stepMonth(by: -1) } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.6))
+                }
+                .buttonStyle(.plain)
+
+                Text("\(monthName) \(service.calendarYear)")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(minWidth: 140, alignment: .center)
+
+                Button { stepMonth(by: 1) } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.6))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 28)
+        .padding(.vertical, 20)
+        .background(Color(red: 0.07, green: 0.07, blue: 0.09))
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.white.opacity(0.06)).frame(height: 1)
+        }
+    }
+
+    // MARK: - Month grid
+
+    private var monthGrid: some View {
+        VStack(spacing: 6) {
+            // Day-of-week headers (Monday first)
+            HStack(spacing: 0) {
+                ForEach(["Mo","Tu","We","Th","Fr","Sa","Su"], id: \.self) { d in
+                    Text(d)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.3))
+                        .frame(maxWidth: .infinity)
+                }
+            }
+
+            let days = computeDays()
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 7), spacing: 4) {
+                ForEach(0..<days.count, id: \.self) { i in
+                    if let day = days[i] {
+                        DayCell(
+                            day: day,
+                            hasMatch: service.calendarMatchDays.contains(day),
+                            isSelected: selectedDay == day
+                        ) {
+                            if service.calendarMatchDays.contains(day) {
+                                selectedDay = (selectedDay == day) ? nil : day
+                                if selectedDay != nil {
+                                    let dateStr = String(format: "%04d-%02d-%02d",
+                                                         service.calendarYear,
+                                                         service.calendarMonth, day)
+                                    Task { await service.loadMatches(filter: .date(dateStr)) }
+                                }
+                            }
+                        }
+                    } else {
+                        Color.clear.frame(height: 38)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Matches for selected day
+
+    @ViewBuilder
+    private func matchesForDay(_ day: Int) -> some View {
+        let dateStr = String(format: "%04d-%02d-%02d",
+                             service.calendarYear, service.calendarMonth, day)
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("\(monthName) \(day)")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(.white)
+                Spacer()
+            }
+
+            if service.isLoadingMatches {
+                ProgressView().tint(.green).frame(maxWidth: .infinity)
+            } else if service.matches.isEmpty {
+                Text("No matches found for this date.")
+                    .foregroundColor(.white.opacity(0.35))
+                    .font(.subheadline)
+            } else {
+                let columns = [GridItem(.adaptive(minimum: 230, maximum: 340), spacing: 16)]
+                LazyVGrid(columns: columns, spacing: 16) {
+                    ForEach(service.matches) { match in
+                        VideoCardView(match: match)
+                            .onTapGesture { selectedMatch = match }
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Helpers
+
+    private func stepMonth(by delta: Int) {
+        var m = service.calendarMonth + delta
+        var y = service.calendarYear
+        if m < 1  { m = 12; y -= 1 }
+        if m > 12 { m = 1;  y += 1 }
+        selectedDay = nil
+        Task { await service.loadCalendar(year: y, month: m) }
+    }
+
+    private func computeDays() -> [Int?] {
+        var cal = Calendar(identifier: .gregorian)
+        cal.firstWeekday = 2  // Monday
+        var c = DateComponents()
+        c.year = service.calendarYear; c.month = service.calendarMonth; c.day = 1
+        guard let first = cal.date(from: c),
+              let range = cal.range(of: .day, in: .month, for: first) else { return [] }
+
+        let weekday = cal.component(.weekday, from: first)
+        // Convert to Monday-based offset (Mon=0 … Sun=6)
+        let offset = (weekday + 5) % 7
+
+        var days: [Int?] = Array(repeating: nil, count: offset)
+        days += (1...range.count).map { Int?($0) }
+        while days.count % 7 != 0 { days.append(nil) }
+        return days
+    }
+}
+
+// MARK: - Day cell
+
+private struct DayCell: View {
+    let day: Int
+    let hasMatch: Bool
+    let isSelected: Bool
+    let onTap: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: onTap) {
+            Text("\(day)")
+                .font(.system(size: 13, weight: hasMatch ? .semibold : .regular))
+                .foregroundColor(foreground)
+                .frame(maxWidth: .infinity)
+                .frame(height: 38)
+                .background(background)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(borderColor, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(!hasMatch)
+        .onHover { isHovered = $0 }
+        .animation(.easeInOut(duration: 0.12), value: isHovered)
+        .animation(.easeInOut(duration: 0.12), value: isSelected)
+    }
+
+    private var foreground: Color {
+        if isSelected { return .black }
+        if hasMatch   { return .green }
+        return .white.opacity(0.25)
+    }
+
+    private var background: Color {
+        if isSelected { return .green }
+        if isHovered && hasMatch { return .green.opacity(0.18) }
+        if hasMatch   { return .green.opacity(0.08) }
+        return .clear
+    }
+
+    private var borderColor: Color {
+        if isSelected { return .clear }
+        if hasMatch   { return .green.opacity(isHovered ? 0.5 : 0.2) }
+        return .clear
+    }
+}
