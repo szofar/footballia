@@ -1,5 +1,7 @@
 import SwiftUI
+#if !os(tvOS)
 import WebKit
+#endif
 import AVKit
 
 // MARK: - Full-screen overlay
@@ -249,6 +251,7 @@ final class VideoFullScreenController: NSObject, NSWindowDelegate {
 
 // MARK: - Shared coordinator
 
+#if !os(tvOS)
 final class VideoPlayerCoordinator: NSObject, WKNavigationDelegate {
     private let url: URL
     private let onPageLoaded: (() -> Void)?
@@ -334,6 +337,7 @@ private final class WeakMessageHandler: NSObject, WKScriptMessageHandler {
         }
     }
 }
+#endif
 
 // MARK: - Platform-specific view wrappers
 
@@ -369,7 +373,7 @@ struct NativeVideoPlayer: NSViewRepresentable {
     func updateNSView(_ view: AVPlayerView, context: Context) {}
 }
 
-#else
+#elseif !os(tvOS)
 
 struct WebVideoPlayer: UIViewRepresentable {
     let url: URL
@@ -382,6 +386,62 @@ struct WebVideoPlayer: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView { context.coordinator.buildWebView() }
     func updateUIView(_ webView: WKWebView, context: Context) {}
+}
+
+struct NativeVideoPlayer: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let vc = AVPlayerViewController()
+        let player = AVPlayer(url: url)
+        vc.player = player
+        player.play()
+        return vc
+    }
+
+    func updateUIViewController(_ vc: AVPlayerViewController, context: Context) {}
+}
+
+#else
+
+// tvOS: WKWebView is unavailable — try to parse the stream URL directly from the match page HTML.
+struct WebVideoPlayer: View {
+    let url: URL
+    var onPageLoaded: (() -> Void)? = nil
+    var onStreamURL: ((URL) -> Void)? = nil
+
+    var body: some View {
+        Color.clear.task { await fetchStream() }
+    }
+
+    private func fetchStream() async {
+        var request = URLRequest(url: url)
+        request.setValue(JS.userAgent, forHTTPHeaderField: "User-Agent")
+        if let cookies = HTTPCookieStorage.shared.cookies(for: url) {
+            for (k, v) in HTTPCookie.requestHeaderFields(with: cookies) {
+                request.setValue(v, forHTTPHeaderField: k)
+            }
+        }
+        guard let (data, _) = try? await URLSession.shared.data(for: request),
+              let html = String(data: data, encoding: .utf8) else {
+            onPageLoaded?(); return
+        }
+        onPageLoaded?()
+
+        // The page embeds the video URL as `new Video("BASE64...")`.
+        // Decode it directly — no JS execution needed.
+        guard let regex = try? NSRegularExpression(pattern: #"new Video\("([A-Za-z0-9+/=\s]+)"\)"#),
+              let match = regex.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+              match.numberOfRanges > 1,
+              let range = Range(match.range(at: 1), in: html) else { return }
+
+        let b64 = String(html[range]).components(separatedBy: .whitespacesAndNewlines).joined()
+        guard let decoded = Data(base64Encoded: b64),
+              let urlString = String(data: decoded, encoding: .utf8),
+              let streamURL = URL(string: urlString) else { return }
+
+        onStreamURL?(streamURL)
+    }
 }
 
 struct NativeVideoPlayer: UIViewControllerRepresentable {
