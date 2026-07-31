@@ -2,7 +2,13 @@ import SwiftUI
 
 struct VideoCardView: View {
     let match: Match
+    #if os(tvOS)
+    @Environment(\.isFocused) private var isFocused
+    private var isHighlighted: Bool { isFocused }
+    #else
     @State private var isHovered = false
+    private var isHighlighted: Bool { isHovered }
+    #endif
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -13,14 +19,16 @@ struct VideoCardView: View {
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.white.opacity(isHovered ? 0.14 : 0.05), lineWidth: 1)
+                .strokeBorder(Color.white.opacity(isHighlighted ? 0.14 : 0.05), lineWidth: 1)
         )
-        .scaleEffect(isHovered ? 1.025 : 1.0)
-        .shadow(color: .black.opacity(isHovered ? 0.5 : 0.2),
-                radius: isHovered ? 18 : 8,
-                y: isHovered ? 10 : 4)
-        .animation(.spring(response: 0.28, dampingFraction: 0.72), value: isHovered)
+        .scaleEffect(isHighlighted ? 1.025 : 1.0)
+        .shadow(color: .black.opacity(isHighlighted ? 0.5 : 0.2),
+                radius: isHighlighted ? 18 : 8,
+                y: isHighlighted ? 10 : 4)
+        .animation(.spring(response: 0.28, dampingFraction: 0.72), value: isHighlighted)
+        #if !os(tvOS)
         .onHover { isHovered = $0 }
+        #endif
     }
 
     private var thumbnailArea: some View {
@@ -44,8 +52,7 @@ struct VideoCardView: View {
                 placeholder
             }
 
-            // Hover play overlay
-            if isHovered {
+            if isHighlighted {
                 Color.black.opacity(0.38)
                 Circle()
                     .fill(.ultraThinMaterial)

@@ -24,8 +24,16 @@ struct VideoGridView: View {
                 ZStack(alignment: .center) {
                     LazyVGrid(columns: columns, spacing: 16) {
                         ForEach(matches) { match in
+                            #if os(tvOS)
+                            Button { onSelect(match) } label: {
+                                VideoCardView(match: match)
+                            }
+                            .buttonStyle(.plain)
+                            .focusEffectDisabled()
+                            #else
                             VideoCardView(match: match)
                                 .onTapGesture { onSelect(match) }
+                            #endif
                         }
                     }
                     .opacity(isLoading ? 0.35 : 1)

@@ -7,8 +7,13 @@ struct MainView: View {
 
     var body: some View {
         ZStack {
+            #if os(tvOS)
+            tvShell
+                .allowsHitTesting(selectedMatch == nil)
+            #else
             appShell
                 .allowsHitTesting(selectedMatch == nil)
+            #endif
 
             if let match = selectedMatch {
                 VideoPlayerOverlay(match: match) {
@@ -20,9 +25,29 @@ struct MainView: View {
                 .zIndex(10)
             }
         }
+        #if !os(tvOS)
         .frame(minWidth: 1000, idealWidth: 1280, minHeight: 660, idealHeight: 800)
+        #endif
     }
 
+    #if os(tvOS)
+    private var tvShell: some View {
+        TabView(selection: $selectedSection) {
+            homeContent
+                .tabItem { Label("Home", systemImage: "house.fill") }
+                .tag(SidebarSection.home)
+            CompetitionsView()
+                .tabItem { Label("Competitions", systemImage: "trophy.fill") }
+                .tag(SidebarSection.competitions)
+            SearchView()
+                .tabItem { Label("Search", systemImage: "magnifyingglass") }
+                .tag(SidebarSection.search)
+            CalendarView()
+                .tabItem { Label("Calendar", systemImage: "calendar") }
+                .tag(SidebarSection.calendar)
+        }
+    }
+    #else
     private var appShell: some View {
         HStack(spacing: 0) {
             SidebarView(selected: $selectedSection, onLogout: service.logout)
@@ -37,6 +62,7 @@ struct MainView: View {
                 .background(Color(red: 0.08, green: 0.08, blue: 0.10))
         }
     }
+    #endif
 
     @ViewBuilder
     private var sectionContent: some View {

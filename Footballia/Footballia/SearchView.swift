@@ -263,7 +263,13 @@ struct SearchView: View {
 private struct SuggestionRow: View {
     let suggestion: SearchSuggestion
     let onTap: () -> Void
+    #if os(tvOS)
+    @Environment(\.isFocused) private var isFocused
+    private var isHighlighted: Bool { isFocused }
+    #else
     @State private var isHovered = false
+    private var isHighlighted: Bool { isHovered }
+    #endif
 
     var body: some View {
         Button(action: onTap) {
@@ -286,11 +292,13 @@ private struct SuggestionRow: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            .background(Color.white.opacity(isHovered ? 0.07 : 0.0))
+            .background(Color.white.opacity(isHighlighted ? 0.07 : 0.0))
             .clipShape(RoundedRectangle(cornerRadius: 8))
         }
         .buttonStyle(.plain)
+        #if !os(tvOS)
         .onHover { isHovered = $0 }
-        .animation(.easeInOut(duration: 0.1), value: isHovered)
+        #endif
+        .animation(.easeInOut(duration: 0.1), value: isHighlighted)
     }
 }

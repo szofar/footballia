@@ -7,8 +7,9 @@ import WebKit
 final class FootballiaService {
 
     // MARK: - Auth state
-    var isLoggedIn  = false
-    var isLoading   = false
+    var isLoggedIn        = false
+    var isCheckingSession = false
+    var isLoading         = false
     var loginError: String?
 
     // MARK: - Match browsing state
@@ -119,6 +120,23 @@ final class FootballiaService {
             loginError = "Connection error: \(error.localizedDescription)"
         }
         isLoading = false
+    }
+
+    func restoreSession() async {
+        isCheckingSession = true
+        defer { isCheckingSession = false }
+
+        guard let url = URL(string: "\(Self.baseURL)/?locale=en"),
+              let html = try? await fetchHTML(from: url),
+              !html.isEmpty else { return }
+
+        // The "Sign in" nav link is only rendered for unauthenticated users
+        guard !html.contains("<span>Sign in</span>") else { return }
+
+        isLoggedIn = true
+        async let t: () = loadFeaturedTeams()
+        async let m: () = loadMatches()
+        _ = await (t, m)
     }
 
     func logout() {

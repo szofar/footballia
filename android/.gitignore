@@ -1,0 +1,11 @@
+*.iml
+.gradle/
+/local.properties
+.idea/
+.DS_Store
+/build
+/app/build
+.kotlin/
+
+# Dev-only login convenience, never commit real credentials
+app/src/debug/assets/footballia-credentials.json

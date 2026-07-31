@@ -164,7 +164,13 @@ struct CompetitionsView: View {
 private struct CompetitionCard: View {
     let competition: Competition
     let onTap: () -> Void
+    #if os(tvOS)
+    @Environment(\.isFocused) private var isFocused
+    private var isHighlighted: Bool { isFocused }
+    #else
     @State private var isHovered = false
+    private var isHighlighted: Bool { isHovered }
+    #endif
 
     var body: some View {
         Button(action: onTap) {
@@ -195,17 +201,19 @@ private struct CompetitionCard: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
-            .background(Color.white.opacity(isHovered ? 0.09 : 0.05))
+            .background(Color.white.opacity(isHighlighted ? 0.09 : 0.05))
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .overlay(
                 RoundedRectangle(cornerRadius: 10)
-                    .stroke(Color.white.opacity(isHovered ? 0.12 : 0.06), lineWidth: 1)
+                    .stroke(Color.white.opacity(isHighlighted ? 0.12 : 0.06), lineWidth: 1)
             )
-            .scaleEffect(isHovered ? 1.02 : 1.0)
+            .scaleEffect(isHighlighted ? 1.02 : 1.0)
         }
         .buttonStyle(.plain)
+        #if !os(tvOS)
         .onHover { isHovered = $0 }
-        .animation(.easeInOut(duration: 0.15), value: isHovered)
+        #endif
+        .animation(.easeInOut(duration: 0.15), value: isHighlighted)
     }
 
     private var iconPlaceholder: some View {

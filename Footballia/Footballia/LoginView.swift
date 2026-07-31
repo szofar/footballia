@@ -18,7 +18,9 @@ struct LoginView: View {
             }
             .padding(40)
         }
+        #if !os(tvOS)
         .frame(minWidth: 480, minHeight: 540)
+        #endif
     }
 
     private var logoSection: some View {

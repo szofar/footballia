@@ -49,7 +49,13 @@ private struct SidebarIconButton: View {
     let section: SidebarSection
     let isSelected: Bool
     let action: () -> Void
+    #if os(tvOS)
+    @Environment(\.isFocused) private var isFocused
+    private var isHighlighted: Bool { isFocused }
+    #else
     @State private var isHovered = false
+    private var isHighlighted: Bool { isHovered }
+    #endif
 
     var body: some View {
         Button(action: action) {
@@ -67,20 +73,22 @@ private struct SidebarIconButton: View {
         }
         .buttonStyle(.plain)
         .help(section.rawValue)
+        #if !os(tvOS)
         .onHover { isHovered = $0 }
-        .animation(.easeInOut(duration: 0.13), value: isHovered)
+        #endif
+        .animation(.easeInOut(duration: 0.13), value: isHighlighted)
         .animation(.easeInOut(duration: 0.13), value: isSelected)
     }
 
     private var background: Color {
         if isSelected { return .green.opacity(0.14) }
-        if isHovered { return .white.opacity(0.06) }
+        if isHighlighted { return .white.opacity(0.06) }
         return .clear
     }
 
     private var iconColor: Color {
         if isSelected { return .green }
-        if isHovered { return .white.opacity(0.65) }
+        if isHighlighted { return .white.opacity(0.65) }
         return .white.opacity(0.38)
     }
 }

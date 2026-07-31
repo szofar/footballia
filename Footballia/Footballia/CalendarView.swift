@@ -167,8 +167,16 @@ struct CalendarView: View {
                 let columns = [GridItem(.adaptive(minimum: 230, maximum: 340), spacing: 16)]
                 LazyVGrid(columns: columns, spacing: 16) {
                     ForEach(service.matches) { match in
+                        #if os(tvOS)
+                        Button { selectedMatch = match } label: {
+                            VideoCardView(match: match)
+                        }
+                        .buttonStyle(.plain)
+                        .focusEffectDisabled()
+                        #else
                         VideoCardView(match: match)
                             .onTapGesture { selectedMatch = match }
+                        #endif
                     }
                 }
             }
@@ -212,7 +220,13 @@ private struct DayCell: View {
     let hasMatch: Bool
     let isSelected: Bool
     let onTap: () -> Void
+    #if os(tvOS)
+    @Environment(\.isFocused) private var isFocused
+    private var isHighlighted: Bool { isFocused }
+    #else
     @State private var isHovered = false
+    private var isHighlighted: Bool { isHovered }
+    #endif
 
     var body: some View {
         Button(action: onTap) {
@@ -230,8 +244,10 @@ private struct DayCell: View {
         }
         .buttonStyle(.plain)
         .disabled(!hasMatch)
+        #if !os(tvOS)
         .onHover { isHovered = $0 }
-        .animation(.easeInOut(duration: 0.12), value: isHovered)
+        #endif
+        .animation(.easeInOut(duration: 0.12), value: isHighlighted)
         .animation(.easeInOut(duration: 0.12), value: isSelected)
     }
 
@@ -243,14 +259,14 @@ private struct DayCell: View {
 
     private var background: Color {
         if isSelected { return .green }
-        if isHovered && hasMatch { return .green.opacity(0.18) }
+        if isHighlighted && hasMatch { return .green.opacity(0.18) }
         if hasMatch   { return .green.opacity(0.08) }
         return .clear
     }
 
     private var borderColor: Color {
         if isSelected { return .clear }
-        if hasMatch   { return .green.opacity(isHovered ? 0.5 : 0.2) }
+        if hasMatch   { return .green.opacity(isHighlighted ? 0.5 : 0.2) }
         return .clear
     }
 }
