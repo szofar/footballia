@@ -157,6 +157,22 @@ class FootballiaRepository {
         parseTeams(fetchHtml("$BASE_URL/?locale=en"))
     }
 
+    // MARK: - Team detail
+
+    /**
+     * Resolves a team's display name and crest from its own page so a team picked out of search
+     * can be cached as a full favourite. Team search results only carry a name and a slug — the
+     * crest lives on the team page, exposed as an Open Graph image.
+     *
+     * Never throws for a missing crest: a favourite with an empty [Team.logoPath] still renders
+     * (the cards fall back to initials), so a markup change degrades instead of blocking the add.
+     */
+    suspend fun loadTeamDetails(slug: String, fallbackName: String = ""): Team =
+        withContext(Dispatchers.IO) {
+            val html = runCatching { fetchHtml("$BASE_URL/teams/$slug?locale=en") }.getOrDefault("")
+            parseTeamDetail(html, slug, fallbackName)
+        }
+
     // MARK: - Competitions
 
     suspend fun loadCompetitions(): List<CompetitionCategory> = withContext(Dispatchers.IO) {
@@ -364,13 +380,49 @@ class FootballiaRepository {
             val window = part.take(600)
             val rawName = extractFirst("""title="([^"]+)"""", window)
                 ?: extractFirst("""alt="([^"]+)"""", window)
-                ?: slug.split("-").joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
-            val name = rawName.replace(" full matches", "").replace(" matches", "").trim()
+                ?: slugToName(slug)
+            val name = cleanTeamName(rawName)
             val logoPath = extractFirst("""src="(/uploads/team/[^"]+)"""", window) ?: ""
             if (name.isNotEmpty()) results += Team(id = slug, slug = slug, name = name, logoPath = logoPath)
         }
         return results
     }
+
+    /**
+     * Pulls a team's name and crest out of its page's Open Graph tags, e.g.
+     *   <meta content="https://footballia.eu/uploads/team/logo/16/medium_….png" property="og:image" />
+     *   <meta content="Real Madrid full matches" property="og:title" />
+     *
+     * Attribute order is matched both ways round because the site emits content-first, but that
+     * is a templating detail rather than a guarantee.
+     */
+    private fun parseTeamDetail(html: String, slug: String, fallbackName: String): Team {
+        // Scope to <head>, where the og tags live, so a stray content=/property= pair in the
+        // body can't win. Falls back to a generous prefix if the closing tag ever goes missing.
+        val headEnd = html.indexOf("</head>", ignoreCase = true)
+        val head = if (headEnd > 0) html.substring(0, headEnd) else html.take(60000)
+
+        val ogImage = extractFirst("""property="og:image"[^>]*content="([^"]+)"""", head)
+            ?: extractFirst("""content="([^"]+)"[^>]*property="og:image"""", head)
+        val logoPath = ogImage
+            ?.removePrefix(BASE_URL)
+            ?.takeIf { it.startsWith("/uploads/team/") }
+            ?: ""
+
+        val ogTitle = extractFirst("""property="og:title"[^>]*content="([^"]+)"""", head)
+            ?: extractFirst("""content="([^"]+)"[^>]*property="og:title"""", head)
+        val name = ogTitle?.let { cleanTeamName(it) }?.takeIf { it.isNotEmpty() }
+            ?: fallbackName.trim().takeIf { it.isNotEmpty() }
+            ?: slugToName(slug)
+
+        return Team(id = slug, slug = slug, name = name, logoPath = logoPath)
+    }
+
+    private fun slugToName(slug: String): String =
+        slug.split("-").joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
+
+    private fun cleanTeamName(raw: String): String =
+        raw.replace(" full matches", "").replace(" matches", "").trim()
 
     private fun parseCompetitions(html: String): List<CompetitionCategory> {
         val categories = mutableListOf<CompetitionCategory>()

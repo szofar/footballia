@@ -6,6 +6,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import net.footballia.data.*
 import java.util.Calendar
@@ -81,6 +83,25 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
     // Favorite teams (cached locally; seeded from the site's featured teams on first launch)
     var favoriteTeams by mutableStateOf<List<Team>>(emptyList()); private set
 
+    /**
+     * False until the favourites list has been read from disk (or seeded). Lets the Favorites
+     * page tell "still loading" apart from "the user cleared the list", which otherwise both
+     * look like an empty list and would leave a spinner up forever.
+     */
+    var favoritesLoaded by mutableStateOf(false); private set
+
+    // Favorite-team editing (Profile tab). Kept apart from the Search tab's state so editing
+    // favourites never disturbs an in-progress search on the other tab.
+    var favoriteTeamSearchResults by mutableStateOf<List<SearchSuggestion>>(emptyList()); private set
+    var isSearchingFavoriteTeams by mutableStateOf(false); private set
+    var favoriteTeamSearchError by mutableStateOf<String?>(null); private set
+
+    /** Slugs whose crest/name lookup is still in flight, so rows can show a spinner. */
+    var pendingFavoriteSlugs by mutableStateOf<Set<String>>(emptySet()); private set
+
+    /** In-flight favourites search, cancelled whenever a newer query supersedes it. */
+    private var favoriteSearchJob: Job? = null
+
     // Competitions
     var competitionCategories by mutableStateOf<List<CompetitionCategory>>(emptyList()); private set
     var isLoadingCompetitions by mutableStateOf(false); private set
@@ -130,6 +151,10 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
         searchResults = emptyList(); searchSuggestions = emptyList(); calendarMatchDays = emptySet()
         currentPage = 1; hasNextPage = false; paginationReversed = false
         currentFilter = MatchFilter.All; activeSuggestion = null
+        favoritesLoaded = false
+        favoriteSearchJob?.cancel()
+        favoriteTeamSearchResults = emptyList(); favoriteTeamSearchError = null
+        isSearchingFavoriteTeams = false; pendingFavoriteSlugs = emptySet()
         hasMasterAccess = null
         accountEmail = null
         viewModelScope.launch {
@@ -139,22 +164,114 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
         repo.clearCookies()
     }
 
-    /** Loads the cached favorite-teams list, seeding the cache from the site on first launch. */
+    /**
+     * Loads the cached favorite-teams list, seeding the cache from the site on first launch.
+     *
+     * A cached empty list is honoured rather than re-seeded: it means the user cleared the list
+     * on purpose, and silently repopulating it would make "Clear All" look broken.
+     */
     private suspend fun loadFavoriteTeams() {
         val cached = runCatching { localStore.loadTeams() }.getOrNull()
         if (cached != null) {
             favoriteTeams = cached
+            favoritesLoaded = true
             return
         }
         val fetched = runCatching { repo.loadFeaturedTeams() }.getOrDefault(emptyList())
-        favoriteTeams = fetched
-        if (fetched.isNotEmpty()) runCatching { localStore.saveTeams(fetched) }
+        // The user may have edited the list from the Profile tab while the homepage fetch was
+        // in flight; `favoritesLoaded` marks the list as theirs, so the seed must not win.
+        if (favoritesLoaded) return
+        if (fetched.isNotEmpty()) {
+            favoriteTeams = fetched
+            runCatching { localStore.saveTeams(fetched) }
+        }
+        // Resolved either way: a failed seed persists nothing, so the next launch retries while
+        // the Favorites page shows its empty state instead of spinning for the whole session.
+        favoritesLoaded = true
     }
 
-    /** Replaces the cached favorites list (entry point for the future editing UI). */
+    /** Replaces the cached favorites list; the Favorites page reads the same state. */
     fun updateFavoriteTeams(teams: List<Team>) {
         favoriteTeams = teams
+        favoritesLoaded = true
         viewModelScope.launch { runCatching { localStore.saveTeams(teams) } }
+    }
+
+    fun isFavorite(slug: String): Boolean = favoriteTeams.any { it.slug == slug }
+
+    /** Team-name search for the Profile tab's favourites editor. */
+    fun searchFavoriteTeamCandidates(query: String) {
+        val q = query.trim()
+        if (q.isEmpty()) { clearFavoriteTeamSearch(); return }
+        // The debounce lives in the UI, but the request itself runs in viewModelScope, so the
+        // previous one has to be cancelled explicitly — otherwise a slow response for an
+        // abandoned prefix can land last and stick on screen.
+        favoriteSearchJob?.cancel()
+        favoriteSearchJob = viewModelScope.launch {
+            isSearchingFavoriteTeams = true
+            favoriteTeamSearchError = null
+            val result = runCatching { repo.search(q, SearchMode.TEAMS) }
+            if (!isActive) return@launch  // superseded: the newer search owns the state now
+            result
+                .onSuccess {
+                    favoriteTeamSearchResults = it
+                    favoriteTeamSearchError = if (it.isEmpty()) "No teams found for \"$q\"." else null
+                }
+                .onFailure {
+                    favoriteTeamSearchResults = emptyList()
+                    favoriteTeamSearchError = "Could not reach the server."
+                }
+            isSearchingFavoriteTeams = false
+        }
+    }
+
+    fun clearFavoriteTeamSearch() {
+        favoriteSearchJob?.cancel()
+        favoriteTeamSearchResults = emptyList()
+        favoriteTeamSearchError = null
+        isSearchingFavoriteTeams = false
+    }
+
+    /**
+     * Adds a team picked from search. The suggestion only carries a name and slug, so the crest
+     * is resolved from the team's own page and cached alongside it — the Favorites page renders
+     * straight from the cache and never re-fetches.
+     */
+    fun addFavoriteTeam(suggestion: SearchSuggestion) {
+        val slug = suggestion.slug
+        if (slug.isEmpty() || isFavorite(slug) || slug in pendingFavoriteSlugs) return
+        pendingFavoriteSlugs = pendingFavoriteSlugs + slug
+        viewModelScope.launch {
+            val team = runCatching { repo.loadTeamDetails(slug, suggestion.name) }
+                .getOrDefault(Team(id = slug, slug = slug, name = suggestion.name, logoPath = ""))
+            // A list-wide action taken during the round-trip drops the pending marker: the
+            // user's newer intent wins, so this add is abandoned rather than resurrecting the
+            // team into a list they just cleared or reset.
+            if (slug !in pendingFavoriteSlugs) return@launch
+            pendingFavoriteSlugs = pendingFavoriteSlugs - slug
+            if (!isFavorite(slug)) updateFavoriteTeams(favoriteTeams + team)
+        }
+    }
+
+    fun removeFavoriteTeam(team: Team) {
+        updateFavoriteTeams(favoriteTeams.filterNot { it.slug == team.slug })
+    }
+
+    /** Empties the list. Persisted as an empty list so it is not re-seeded on the next launch. */
+    fun clearFavoriteTeams() {
+        pendingFavoriteSlugs = emptySet()
+        updateFavoriteTeams(emptyList())
+    }
+
+    /** Restores the default list: the site's current featured-teams strip. */
+    fun restoreDefaultFavoriteTeams() {
+        viewModelScope.launch {
+            val fetched = runCatching { repo.loadFeaturedTeams() }.getOrDefault(emptyList())
+            if (fetched.isNotEmpty()) {
+                pendingFavoriteSlugs = emptySet()
+                updateFavoriteTeams(fetched)
+            }
+        }
     }
 
     fun loadMatches(filter: MatchFilter? = null, page: Int = 1) {

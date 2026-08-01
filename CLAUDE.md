@@ -31,6 +31,14 @@ There is no token/OAuth — auth is **cookie-based**, matching the website's Dev
 - **Session persistence relies on the `remember_me` cookie**, which is written to disk by the cookie store and survives restarts. On launch both apps call `restoreSession()` — fetch the homepage and treat the user as logged in if the "Sign in" nav link (`<span>Sign in</span>`) is **absent** — before falling back to a credentials login. `logout()` clears the persisted cookies.
 - **Dev auto-login:** a local `footballia-credentials.json` (`{"email","password"}`) auto-fills login for development. On Android it's a debug-only asset (`app/src/debug/assets/`, loaded by `DevCredentials`); the release variant has a no-op `DevCredentials`. On Swift it's read from `~/Downloads/`. This file is never shipped in release.
 
+## Favourite teams
+
+The site has no notion of a user's favourites, so both apps own the list locally. It's persisted (Android: `LocalStore`/DataStore; Swift: `FavoriteTeamsStore`/`UserDefaults`) with each team's name, logo path and slug cached, so the Favorites page renders straight from disk and never re-scrapes.
+
+- **One source of truth.** Profile › Favorite Teams edits the same `favoriteTeams` state the Favorites page renders (`FootballiaViewModel` / `FootballiaService`), so the two stay in sync automatically. Route every mutation through `updateFavoriteTeams` / `setFavoriteTeams` so the change is persisted.
+- **Seeded once, then user-owned.** The list is seeded from the homepage's featured-teams strip on first launch only. Presence of the *cache key* — not a non-empty list — is what marks it seeded, so "Clear All" (which persists an empty list) is not silently undone on the next launch.
+- **Adding from search costs an extra fetch.** Team search results carry only a name and a slug, so `loadTeamDetails` pulls the crest and canonical name from the team page's `og:image` / `og:title` tags. A missing crest is not an error — cards fall back to initials — so a markup change degrades instead of blocking the add.
+
 ## Android architecture
 
 Single-Activity Compose app, MVVM-ish:

@@ -58,8 +58,9 @@ struct FavoritesView: View {
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.82), value: selectedTeam != nil)
         .task {
-            // Seeds the cache on first ever launch
-            if service.favoriteTeams.isEmpty { await service.loadFeaturedTeams() }
+            // Seeds the cache on first ever launch. An empty list with a cache present means the
+            // user cleared it on purpose, so it is left alone rather than silently repopulated.
+            if !FavoriteTeamsStore.hasCache { await service.loadFeaturedTeams() }
         }
     }
 
@@ -83,10 +84,19 @@ struct FavoritesView: View {
 
                 if service.favoriteTeams.isEmpty {
                     VStack(spacing: 10) {
-                        ProgressView().tint(.green)
-                        Text("Loading teams…")
-                            .font(.subheadline)
-                            .foregroundColor(.white.opacity(0.3))
+                        if FavoriteTeamsStore.hasCache {
+                            Text("No favorite teams")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundColor(.white)
+                            Text("Add teams from Profile › Favorite Teams.")
+                                .font(.subheadline)
+                                .foregroundColor(.white.opacity(0.3))
+                        } else {
+                            ProgressView().tint(.green)
+                            Text("Loading teams…")
+                                .font(.subheadline)
+                                .foregroundColor(.white.opacity(0.3))
+                        }
                     }
                     .frame(maxWidth: .infinity, minHeight: 220)
                 } else {
@@ -166,15 +176,23 @@ struct TeamCardView: View {
     var body: some View {
         Button(action: onTap) {
             VStack(spacing: 12) {
-                AsyncImage(url: team.logoURL) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().aspectRatio(contentMode: .fit)
-                    case .failure:
-                        logoPlaceholder
-                    case .empty:
-                        Color.clear
-                    @unknown default:
+                // A nil URL (no crest resolved) never reaches AsyncImage's .failure phase, so
+                // the placeholder has to be chosen up front rather than in the phase switch.
+                Group {
+                    if let logoURL = team.logoURL {
+                        AsyncImage(url: logoURL) { phase in
+                            switch phase {
+                            case .success(let image):
+                                image.resizable().aspectRatio(contentMode: .fit)
+                            case .failure:
+                                logoPlaceholder
+                            case .empty:
+                                Color.clear
+                            @unknown default:
+                                logoPlaceholder
+                            }
+                        }
+                    } else {
                         logoPlaceholder
                     }
                 }

@@ -128,7 +128,7 @@ struct Team: Identifiable, Hashable, Codable {
     let logoPath: String
 
     var logoURL: URL? {
-        URL(string: "\(FootballiaService.baseURL)\(logoPath)")
+        logoPath.isEmpty ? nil : URL(string: "\(FootballiaService.baseURL)\(logoPath)")
     }
 }
 

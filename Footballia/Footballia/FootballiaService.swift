@@ -31,11 +31,21 @@ final class FootballiaService {
 
     // MARK: - Favourite teams
     /// The cached "top teams" list, seeded from the site's featured-teams strip on
-    /// first launch and persisted from then on so it stays stable across sessions.
+    /// first launch and persisted from then on. The Profile tab edits this list and the
+    /// Favorites page renders it, so both stay in sync through this single property.
     var favoriteTeams: [Team] = FavoriteTeamsStore.load()
 
     /// The live featured-teams strip from the homepage (used only to seed the cache).
     var featuredTeams: [Team] = []
+
+    /// Favourite-team editing state for the Profile tab. Deliberately separate from the
+    /// Search tab's state so editing favourites never disturbs an in-progress search there.
+    var favoriteTeamSearchResults: [SearchSuggestion] = []
+    var isSearchingFavoriteTeams = false
+    var favoriteTeamSearchError: String?
+
+    /// Slugs whose crest/name lookup is still in flight, so rows can show a spinner.
+    var pendingFavoriteSlugs: Set<String> = []
 
     // MARK: - Account
     var accountEmail: String? = UserDefaults.standard.string(forKey: "footballia.accountEmail")
@@ -164,6 +174,8 @@ final class FootballiaService {
         isLoggedIn = false
         matches = []; featuredTeams = []; competitionCategories = []
         searchResults = []; searchSuggestions = []; calendarMatchDays = []
+        favoriteTeamSearchResults = []; favoriteTeamSearchError = nil
+        isSearchingFavoriteTeams = false; pendingFavoriteSlugs = []
         currentPage = 1; hasNextPage = false; currentFilter = .all; paginationReversed = false
         hasMasterAccess = false; didCheckMasterAccess = false
         accountEmail = nil
@@ -289,10 +301,43 @@ final class FootballiaService {
         }
     }
 
-    /// Replaces the cached favourites list (entry point for the future editing UI).
+    /// Replaces the cached favourites list. The Favorites page renders this same property,
+    /// so edits made in the Profile tab show up there immediately and survive relaunches.
     func setFavoriteTeams(_ teams: [Team]) {
         favoriteTeams = teams
         FavoriteTeamsStore.save(teams)
+    }
+
+    func isFavorite(slug: String) -> Bool {
+        favoriteTeams.contains { $0.slug == slug }
+    }
+
+    /// Adds a team picked from search. The suggestion only carries a name and a slug, so the
+    /// crest is resolved from the team's own page and cached alongside it — the Favorites page
+    /// renders straight from the cache and never re-fetches.
+    func addFavoriteTeam(_ suggestion: SearchSuggestion) async {
+        let slug = suggestion.slug
+        guard !slug.isEmpty, !isFavorite(slug: slug), !pendingFavoriteSlugs.contains(slug) else { return }
+        pendingFavoriteSlugs.insert(slug)
+        let team = await loadTeamDetails(slug: slug, fallbackName: suggestion.name)
+        // A list-wide action taken during the round-trip drops the pending marker: the user's
+        // newer intent wins, so this add is abandoned rather than resurrecting the team into a
+        // list they just cleared or reset.
+        guard pendingFavoriteSlugs.contains(slug) else { return }
+        pendingFavoriteSlugs.remove(slug)
+        guard !isFavorite(slug: slug) else { return }
+        setFavoriteTeams(favoriteTeams + [team])
+    }
+
+    func removeFavoriteTeam(_ team: Team) {
+        setFavoriteTeams(favoriteTeams.filter { $0.slug != team.slug })
+    }
+
+    /// Empties the list. Persisted as an empty list rather than a cleared key so it is not
+    /// silently re-seeded from the site on the next launch.
+    func clearFavoriteTeams() {
+        pendingFavoriteSlugs = []
+        setFavoriteTeams([])
     }
 
     /// Re-seeds the favourites cache from the site's current top-teams strip.
@@ -304,7 +349,61 @@ final class FootballiaService {
             guard !parsed.isEmpty else { return }
             featuredTeams = parsed
         }
+        pendingFavoriteSlugs = []
         setFavoriteTeams(featuredTeams)
+    }
+
+    // MARK: - Favourite team search (Profile tab)
+
+    /// Team-name search for the favourites editor, kept out of `searchSuggestions` so the
+    /// Search tab's own results are untouched.
+    func searchFavoriteTeamCandidates(query: String) async {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { clearFavoriteTeamSearch(); return }
+        isSearchingFavoriteTeams = true
+        favoriteTeamSearchError = nil
+
+        var html: String?
+        if let url = URL(string:
+            "\(Self.baseURL)\(SearchMode.teams.actionPath)?\(SearchMode.teams.paramName)=\(q.urlFormEncoded)&locale=en") {
+            html = try? await fetchHTML(from: url)
+        }
+
+        // The caller debounces by cancelling this task on every keystroke, and a cancelled
+        // fetch surfaces as a nil result. Bail without touching state so a superseded search
+        // can't report a network failure that never happened — or clear the newer one's spinner.
+        guard !Task.isCancelled else { return }
+        isSearchingFavoriteTeams = false
+
+        guard let html, !html.isEmpty else {
+            favoriteTeamSearchResults = []
+            favoriteTeamSearchError = "Could not reach the server."
+            return
+        }
+
+        let suggestions = parseTeamSuggestions(from: html)
+        favoriteTeamSearchResults = suggestions
+        favoriteTeamSearchError = suggestions.isEmpty ? "No teams found for \"\(q)\"." : nil
+    }
+
+    func clearFavoriteTeamSearch() {
+        favoriteTeamSearchResults = []
+        favoriteTeamSearchError = nil
+        isSearchingFavoriteTeams = false
+    }
+
+    // MARK: - Team detail
+
+    /// Resolves a team's display name and crest from its own page so a team picked out of
+    /// search can be cached as a full favourite.
+    ///
+    /// Never fails for a missing crest: a favourite with an empty `logoPath` still renders
+    /// (cards fall back to initials), so a markup change degrades instead of blocking the add.
+    func loadTeamDetails(slug: String, fallbackName: String = "") async -> Team {
+        guard let url  = URL(string: "\(Self.baseURL)/teams/\(slug)?locale=en"),
+              let html = try? await fetchHTML(from: url)
+        else { return parseTeamDetail(from: "", slug: slug, fallbackName: fallbackName) }
+        return parseTeamDetail(from: html, slug: slug, fallbackName: fallbackName)
     }
 
     // MARK: - Competitions
@@ -737,16 +836,56 @@ final class FootballiaService {
             let window = String(part.prefix(600))
             let rawName = extractFirst(pattern: #"title=\"([^\"]+)\""#, in: window)
                 ?? extractFirst(pattern: #"alt=\"([^\"]+)\""#, in: window)
-                ?? slug.components(separatedBy: "-").map { $0.capitalized }.joined(separator: " ")
-            let name = rawName
-                .replacingOccurrences(of: " full matches", with: "")
-                .replacingOccurrences(of: " matches", with: "")
-                .trimmed
+                ?? Self.name(fromSlug: slug)
+            let name = Self.cleanTeamName(rawName)
             let logoPath = extractFirst(pattern: #"src=\"(/uploads/team/[^\"]+)\""#, in: window) ?? ""
             guard !name.isEmpty else { continue }
             results.append(Team(id: slug, slug: slug, name: name, logoPath: logoPath))
         }
         return results
+    }
+
+    // A team page exposes its own name and crest through Open Graph tags, e.g.
+    //   <meta content="https://footballia.eu/uploads/team/logo/16/medium_….png" property="og:image" />
+    //   <meta content="Real Madrid full matches" property="og:title" />
+    //
+    // Attribute order is matched both ways round because the site emits content-first, but
+    // that is a templating detail rather than a guarantee.
+    private func parseTeamDetail(from html: String, slug: String, fallbackName: String) -> Team {
+        // Scope to <head>, where the og tags live, so a stray content=/property= pair in the
+        // body can't win. Falls back to a generous prefix if the closing tag ever goes missing.
+        let head: String
+        if let end = html.range(of: "</head>", options: .caseInsensitive) {
+            head = String(html[html.startIndex..<end.lowerBound])
+        } else {
+            head = String(html.prefix(60_000))
+        }
+
+        let ogImage = extractFirst(pattern: #"property=\"og:image\"[^>]*content=\"([^\"]+)\""#, in: head)
+            ?? extractFirst(pattern: #"content=\"([^\"]+)\"[^>]*property=\"og:image\""#, in: head)
+        var logoPath = ""
+        if var candidate = ogImage {
+            if candidate.hasPrefix(Self.baseURL) { candidate.removeFirst(Self.baseURL.count) }
+            if candidate.hasPrefix("/uploads/team/") { logoPath = candidate }
+        }
+
+        let ogTitle = extractFirst(pattern: #"property=\"og:title\"[^>]*content=\"([^\"]+)\""#, in: head)
+            ?? extractFirst(pattern: #"content=\"([^\"]+)\"[^>]*property=\"og:title\""#, in: head)
+        let parsedName = ogTitle.map { Self.cleanTeamName($0) } ?? ""
+        let name = !parsedName.isEmpty ? parsedName
+            : (!fallbackName.trimmed.isEmpty ? fallbackName.trimmed : Self.name(fromSlug: slug))
+
+        return Team(id: slug, slug: slug, name: name, logoPath: logoPath)
+    }
+
+    private static func name(fromSlug slug: String) -> String {
+        slug.components(separatedBy: "-").map { $0.capitalized }.joined(separator: " ")
+    }
+
+    private static func cleanTeamName(_ raw: String) -> String {
+        raw.replacingOccurrences(of: " full matches", with: "")
+            .replacingOccurrences(of: " matches", with: "")
+            .trimmed
     }
 
     // MARK: - Competition parser

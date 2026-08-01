@@ -92,8 +92,17 @@ fun FavoritesScreen(viewModel: FootballiaViewModel, onMatchSelect: (Match) -> Un
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                CircularProgressIndicator(color = Color(0xFF22C55E))
-                Text("Loading teams…", color = Color.White.copy(alpha = 0.3f), fontSize = 13.sp)
+                if (viewModel.favoritesLoaded) {
+                    Text("No favorite teams", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Add teams from Profile › Favorite Teams.",
+                        color = Color.White.copy(alpha = 0.3f),
+                        fontSize = 13.sp
+                    )
+                } else {
+                    CircularProgressIndicator(color = Color(0xFF22C55E))
+                    Text("Loading teams…", color = Color.White.copy(alpha = 0.3f), fontSize = 13.sp)
+                }
             }
         }
         return
