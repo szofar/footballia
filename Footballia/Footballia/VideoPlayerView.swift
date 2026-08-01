@@ -550,7 +550,7 @@ struct WebVideoPlayer: View {
     }
 }
 
-// MARK: tvOS native player — custom VC so AVPlayerViewController owns the focus
+// MARK: tvOS native player — fully custom controls
 
 struct NativeVideoPlayer: UIViewControllerRepresentable {
     let url: URL
@@ -563,10 +563,24 @@ struct NativeVideoPlayer: UIViewControllerRepresentable {
     func updateUIViewController(_ vc: TVVideoPlayerViewController, context: Context) {}
 }
 
+// Parent VC: owns AVPlayerViewController (no system controls) + TVControlsOverlay + all input handling.
 final class TVVideoPlayerViewController: UIViewController {
     private let url: URL
     private let onClose: () -> Void
+
     private var playerVC: AVPlayerViewController!
+    private var player: AVPlayer!
+    private var controls: TVControlsOverlay!
+    private var timeObserver: Any?
+
+    // Controls auto-hide
+    private var controlsVisible = false
+    private var hideTimer: Timer?
+
+    // Hold-to-seek
+    private var holdTimer: Timer?
+    private var holdStart: Date?
+    private var holdDirection: Int = 0  // -1 or +1
 
     init(url: URL, onClose: @escaping () -> Void) {
         self.url = url
@@ -578,16 +592,17 @@ final class TVVideoPlayerViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        setupPlayer()
+        setupControls()
+        setupSwipeGestures()
+    }
 
-        let player = AVPlayer(url: url)
+    private func setupPlayer() {
+        player = AVPlayer(url: url)
+
         playerVC = AVPlayerViewController()
         playerVC.player = player
-        playerVC.showsPlaybackControls = true
-
-        // Back button shown/hidden in sync with the transport controls overlay
-        playerVC.customOverlayViewController = TVBackButtonViewController { [weak self] in
-            self?.onClose()
-        }
+        playerVC.showsPlaybackControls = false
 
         addChild(playerVC)
         view.addSubview(playerVC.view)
@@ -595,53 +610,318 @@ final class TVVideoPlayerViewController: UIViewController {
         playerVC.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         playerVC.didMove(toParent: self)
 
+        // Periodic time updates → controls progress bar
+        let interval = CMTime(seconds: 0.5, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+        timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+            guard let self,
+                  let item = self.player.currentItem,
+                  item.duration.isNumeric else { return }
+            self.controls.update(
+                current: time.seconds,
+                duration: item.duration.seconds,
+                isPlaying: self.player.timeControlStatus == .playing
+            )
+        }
+
         player.play()
     }
 
-    // Intercept the remote's menu/back button to dismiss the player
+    private func setupControls() {
+        controls = TVControlsOverlay(frame: view.bounds)
+        controls.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        controls.alpha = 0
+        controls.onBack      = { [weak self] in self?.onClose() }
+        controls.onPlayPause = { [weak self] in self?.togglePlayPause() }
+        controls.onRewind    = { [weak self] in self?.seek(by: -10) }
+        controls.onForward   = { [weak self] in self?.seek(by:  10) }
+        view.addSubview(controls)
+    }
+
+    // Touchpad horizontal swipes → ±30 s
+    private func setupSwipeGestures() {
+        let left  = UISwipeGestureRecognizer(target: self, action: #selector(swipedLeft))
+        left.direction = .left
+        let right = UISwipeGestureRecognizer(target: self, action: #selector(swipedRight))
+        right.direction = .right
+        view.addGestureRecognizer(left)
+        view.addGestureRecognizer(right)
+    }
+
+    // MARK: - Playback
+
+    private func togglePlayPause() {
+        if player.timeControlStatus == .playing { player.pause() } else { player.play() }
+        controls.setPlaying(player.timeControlStatus == .playing)
+        resetHideTimer()
+    }
+
+    private func seek(by seconds: Double) {
+        let current  = player.currentTime().seconds
+        let duration = player.currentItem?.duration.seconds ?? 0
+        let target   = max(0, min(current + seconds, duration))
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
+                    toleranceBefore: .zero, toleranceAfter: .zero)
+        resetHideTimer()
+    }
+
+    // MARK: - Controls visibility
+
+    private func showControls() {
+        controlsVisible = true
+        UIView.animate(withDuration: 0.2) { self.controls.alpha = 1 }
+        resetHideTimer()
+    }
+
+    private func hideControls() {
+        controlsVisible = false
+        hideTimer?.invalidate()
+        hideTimer = nil
+        UIView.animate(withDuration: 0.2) { self.controls.alpha = 0 }
+    }
+
+    private func resetHideTimer() {
+        hideTimer?.invalidate()
+        hideTimer = Timer.scheduledTimer(withTimeInterval: 7, repeats: false) { [weak self] _ in
+            self?.hideControls()
+        }
+    }
+
+    // MARK: - Swipe handlers
+
+    @objc private func swipedLeft()  { seek(by: -30); if !controlsVisible { showControls() } }
+    @objc private func swipedRight() { seek(by:  30); if !controlsVisible { showControls() } }
+
+    // MARK: - Remote press handling
+
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        if presses.contains(where: { $0.type == .menu }) {
-            onClose()
-        } else {
+        guard let press = presses.first else { super.pressesBegan(presses, with: event); return }
+        switch press.type {
+
+        case .menu:
+            if controlsVisible { hideControls() } else { onClose() }
+
+        case .select:
+            if controlsVisible { togglePlayPause() } else { showControls() }
+
+        case .playPause:
+            togglePlayPause()
+
+        case .leftArrow:
+            if !controlsVisible { showControls() }
+            seek(by: -10)
+            beginHold(direction: -1)
+
+        case .rightArrow:
+            if !controlsVisible { showControls() }
+            seek(by: 10)
+            beginHold(direction: 1)
+
+        default:
             super.pressesBegan(presses, with: event)
         }
     }
-}
 
-final class TVBackButtonViewController: UIViewController {
-    private let onBack: () -> Void
-
-    init(onBack: @escaping () -> Void) {
-        self.onBack = onBack
-        super.init(nibName: nil, bundle: nil)
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if presses.contains(where: { $0.type == .leftArrow || $0.type == .rightArrow }) { endHold() }
+        super.pressesEnded(presses, with: event)
     }
 
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if presses.contains(where: { $0.type == .leftArrow || $0.type == .rightArrow }) { endHold() }
+        super.pressesCancelled(presses, with: event)
+    }
+
+    // MARK: - Progressive hold seek
+
+    private func beginHold(direction: Int) {
+        holdDirection = direction
+        holdStart = Date()
+        holdTimer?.invalidate()
+        // Pause 0.5 s before repeating kicks in (distinguishes tap from hold)
+        holdTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
+            self?.repeatSeek()
+        }
+    }
+
+    private func repeatSeek() {
+        guard holdDirection != 0 else { return }
+        let elapsed = Date().timeIntervalSince(holdStart ?? Date())
+        // Skip amount grows with hold duration
+        let skip: Double = elapsed < 2 ? 30 : elapsed < 5 ? 60 : 120
+        seek(by: Double(holdDirection) * skip)
+        holdTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
+            self?.repeatSeek()
+        }
+    }
+
+    private func endHold() {
+        holdTimer?.invalidate(); holdTimer = nil
+        holdDirection = 0; holdStart = nil
+    }
+
+    deinit {
+        if let obs = timeObserver { player.removeTimeObserver(obs) }
+        holdTimer?.invalidate()
+        hideTimer?.invalidate()
+    }
+}
+
+// MARK: - Custom controls overlay
+
+final class TVControlsOverlay: UIView {
+    var onBack:      (() -> Void)?
+    var onPlayPause: (() -> Void)?
+    var onRewind:    (() -> Void)?
+    var onForward:   (() -> Void)?
+
+    private let backButton      = UIButton(type: .system)
+    private let rewindButton    = UIButton(type: .system)
+    private let playPauseButton = UIButton(type: .system)
+    private let forwardButton   = UIButton(type: .system)
+    private let progressTrack   = UIView()
+    private let progressFill    = UIView()
+    private let currentLabel    = UILabel()
+    private let durationLabel   = UILabel()
+
+    private var fillWidthConstraint: NSLayoutConstraint!
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        build()
+    }
     required init?(coder: NSCoder) { fatalError() }
 
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        view.backgroundColor = .clear
+    private func build() {
+        backgroundColor = UIColor.black.withAlphaComponent(0.52)
 
-        var config = UIButton.Configuration.plain()
-        config.image = UIImage(systemName: "chevron.left")
-        config.title = "Back"
-        config.baseForegroundColor = .white
-        config.imagePadding = 8
-        config.preferredSymbolConfigurationForImage =
-            UIImage.SymbolConfiguration(pointSize: 22, weight: .semibold)
+        // — Back button (top-left) —
+        var bc = UIButton.Configuration.plain()
+        bc.image = UIImage(systemName: "chevron.left")
+        bc.title = "Back"
+        bc.baseForegroundColor = .white
+        bc.imagePadding = 8
+        bc.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 22, weight: .semibold)
+        backButton.configuration = bc
+        backButton.addTarget(self, action: #selector(backTapped), for: .primaryActionTriggered)
+        backButton.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(backButton)
 
-        let button = UIButton(configuration: config)
-        button.addTarget(self, action: #selector(backTapped), for: .primaryActionTriggered)
-        button.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(button)
+        // — Center control row: rewind | play/pause | forward —
+        configureIconButton(rewindButton,    systemName: "gobackward.10",  size: 38)
+        configureIconButton(playPauseButton, systemName: "play.fill",      size: 54)
+        configureIconButton(forwardButton,   systemName: "goforward.10",   size: 38)
+
+        rewindButton.addTarget(self,    action: #selector(rewindTapped),    for: .primaryActionTriggered)
+        playPauseButton.addTarget(self, action: #selector(playPauseTapped), for: .primaryActionTriggered)
+        forwardButton.addTarget(self,   action: #selector(forwardTapped),   for: .primaryActionTriggered)
+
+        let centerStack = UIStackView(arrangedSubviews: [rewindButton, playPauseButton, forwardButton])
+        centerStack.axis = .horizontal
+        centerStack.spacing = 80
+        centerStack.alignment = .center
+        centerStack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(centerStack)
+
+        // — Progress bar —
+        progressTrack.backgroundColor = UIColor.white.withAlphaComponent(0.22)
+        progressTrack.layer.cornerRadius = 3
+        progressTrack.clipsToBounds = true
+        progressTrack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(progressTrack)
+
+        progressFill.backgroundColor = .white
+        progressFill.translatesAutoresizingMaskIntoConstraints = false
+        progressTrack.addSubview(progressFill)
+
+        fillWidthConstraint = progressFill.widthAnchor.constraint(equalToConstant: 0)
+
+        // — Time labels —
+        styleLabel(currentLabel,  size: 28, alpha: 1.0)
+        styleLabel(durationLabel, size: 28, alpha: 0.55)
+        currentLabel.text  = "0:00"
+        durationLabel.text = "0:00"
 
         NSLayoutConstraint.activate([
-            button.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 40),
-            button.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 60)
+            // Back button
+            backButton.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 40),
+            backButton.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor, constant: 60),
+
+            // Center controls — vertically centred, offset slightly above middle
+            centerStack.centerXAnchor.constraint(equalTo: centerXAnchor),
+            centerStack.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -20),
+
+            // Current time label — bottom-left
+            currentLabel.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor, constant: 60),
+            currentLabel.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -60),
+
+            // Duration label — bottom-right
+            durationLabel.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor, constant: -60),
+            durationLabel.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -60),
+
+            // Progress track — between the two time labels
+            progressTrack.leadingAnchor.constraint(equalTo: currentLabel.trailingAnchor, constant: 24),
+            progressTrack.trailingAnchor.constraint(equalTo: durationLabel.leadingAnchor, constant: -24),
+            progressTrack.centerYAnchor.constraint(equalTo: currentLabel.centerYAnchor),
+            progressTrack.heightAnchor.constraint(equalToConstant: 6),
+
+            // Progress fill — pinned to track's left, height matches track
+            progressFill.leadingAnchor.constraint(equalTo: progressTrack.leadingAnchor),
+            progressFill.topAnchor.constraint(equalTo: progressTrack.topAnchor),
+            progressFill.bottomAnchor.constraint(equalTo: progressTrack.bottomAnchor),
+            fillWidthConstraint,
         ])
     }
 
-    @objc private func backTapped() { onBack() }
+    // MARK: - Update
+
+    func update(current: Double, duration: Double, isPlaying: Bool) {
+        currentLabel.text  = format(current)
+        durationLabel.text = format(duration)
+        setPlaying(isPlaying)
+
+        // Update fill bar after layout so bounds are valid
+        setNeedsLayout()
+        layoutIfNeeded()
+        let ratio = duration > 0 ? min(max(current / duration, 0), 1) : 0
+        fillWidthConstraint.constant = progressTrack.bounds.width * CGFloat(ratio)
+    }
+
+    func setPlaying(_ playing: Bool) {
+        var cfg = playPauseButton.configuration
+        cfg?.image = UIImage(systemName: playing ? "pause.fill" : "play.fill")
+        playPauseButton.configuration = cfg
+    }
+
+    // MARK: - Helpers
+
+    private func configureIconButton(_ button: UIButton, systemName: String, size: CGFloat) {
+        var cfg = UIButton.Configuration.plain()
+        cfg.image = UIImage(systemName: systemName)
+        cfg.baseForegroundColor = .white
+        cfg.preferredSymbolConfigurationForImage =
+            UIImage.SymbolConfiguration(pointSize: size, weight: .medium)
+        button.configuration = cfg
+    }
+
+    private func styleLabel(_ label: UILabel, size: CGFloat, alpha: CGFloat) {
+        label.font = .monospacedDigitSystemFont(ofSize: size, weight: .medium)
+        label.textColor = UIColor.white.withAlphaComponent(alpha)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+    }
+
+    private func format(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "0:00" }
+        let s = Int(seconds)
+        let h = s / 3600; let m = (s % 3600) / 60; let sec = s % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, sec)
+                     : String(format: "%d:%02d", m, sec)
+    }
+
+    @objc private func backTapped()      { onBack?() }
+    @objc private func playPauseTapped() { onPlayPause?() }
+    @objc private func rewindTapped()    { onRewind?() }
+    @objc private func forwardTapped()   { onForward?() }
 }
 
 #endif

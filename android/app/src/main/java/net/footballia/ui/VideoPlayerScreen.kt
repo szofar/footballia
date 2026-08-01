@@ -12,15 +12,34 @@ import net.footballia.R
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Forward10
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -30,12 +49,23 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
+import androidx.tv.material3.IconButtonDefaults
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import net.footballia.data.Match
+import androidx.tv.material3.IconButton as TvIconButton
 
 private const val STREAM_TIMEOUT_MS = 25_000L
-private const val CONTROLLER_TIMEOUT_MS = 7_000
+private const val CONTROLS_HIDE_DELAY_MS = 7_000L
+private const val SKIP_MS = 10_000L
+private const val SEEK_BAR_MIN_STEP_MS = 10_000L
+private const val SEEK_BAR_MAX_STEP_MS = 600_000L
+private const val SEEK_BAR_RAMP_MS = 7_000L
+private const val HOLD_ENGAGE_DELAY_MS = 350L
+private const val HOLD_TICK_MS = 220L
+private const val HOLD_MAX_STEP_MS = 60_000L
+private val ACCENT_GREEN = Color(0xFF22C55E)
 
 @OptIn(UnstableApi::class)
 @Composable
@@ -45,7 +75,17 @@ fun VideoPlayerScreen(match: Match, onClose: () -> Unit) {
     var streamUrl by remember { mutableStateOf<String?>(null) }
     var isLoading by remember { mutableStateOf(true) }
     var loadFailed by remember { mutableStateOf(false) }
+
     var controlsVisible by remember { mutableStateOf(false) }
+    var interactionTick by remember { mutableStateOf(0) }
+    var isPlaying by remember { mutableStateOf(true) }
+    var positionMs by remember { mutableStateOf(0L) }
+    var durationMs by remember { mutableStateOf(0L) }
+
+    fun onInteraction() {
+        controlsVisible = true
+        interactionTick++
+    }
 
     // Remote's back button exits the video instead of navigating within it.
     BackHandler(onBack = onClose)
@@ -58,7 +98,23 @@ fun VideoPlayerScreen(match: Match, onClose: () -> Unit) {
         isLoading = false
     }
 
-    Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+    // Controls auto-hide after a period of inactivity; any interaction resets it.
+    LaunchedEffect(controlsVisible, interactionTick) {
+        if (controlsVisible) {
+            delay(CONTROLS_HIDE_DELAY_MS)
+            controlsVisible = false
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .onPreviewKeyEvent { event ->
+                if (event.type == KeyEventType.KeyDown) onInteraction()
+                false
+            }
+    ) {
 
         // Hidden WebView loads the match page and extracts the HLS stream URL via JS
         if (streamUrl == null) {
@@ -126,6 +182,19 @@ fun VideoPlayerScreen(match: Match, onClose: () -> Unit) {
                 onDispose { player.release() }
             }
 
+            // PlayerView's built-in controller is disabled (see video_player_view.xml);
+            // this polls playback state for the custom Compose controls below instead.
+            LaunchedEffect(player) {
+                while (true) {
+                    isPlaying = player.isPlaying
+                    positionMs = player.currentPosition.coerceAtLeast(0)
+                    durationMs = player.duration.coerceAtLeast(0)
+                    delay(200)
+                }
+            }
+
+            LaunchedEffect(url) { onInteraction() }
+
             AndroidView(
                 factory = { ctx ->
                     // Inflated from XML so the PlayerView uses a TextureView surface
@@ -134,23 +203,31 @@ fun VideoPlayerScreen(match: Match, onClose: () -> Unit) {
                     val view = LayoutInflater.from(ctx)
                         .inflate(R.layout.video_player_view, null) as PlayerView
                     view.player = player
-                    // Standard play/pause/seek controls, shown on D-pad center press
-                    // (built into PlayerView for TV) and auto-hidden after 7s idle.
-                    view.controllerShowTimeoutMs = CONTROLLER_TIMEOUT_MS
-                    view.setControllerVisibilityListener(
-                        PlayerView.ControllerVisibilityListener { visibility ->
-                            controlsVisible = visibility == android.view.View.VISIBLE
-                        }
-                    )
+                    // Controls are the custom Compose overlay below; don't let this
+                    // view steal D-pad focus from it.
+                    view.isFocusable = false
                     view
                 },
-                update = { view ->
-                    view.player = player
-                    // requestFocus() in factory() can no-op if the view isn't attached
-                    // to the window yet; update() reliably runs after attachment.
-                    if (!view.hasFocus()) view.requestFocus()
-                },
+                update = { view -> view.player = player },
                 modifier = Modifier.fillMaxSize()
+            )
+
+            VideoControls(
+                visible = controlsVisible,
+                isPlaying = isPlaying,
+                positionMs = positionMs,
+                durationMs = durationMs,
+                onPlayPause = {
+                    onInteraction()
+                    if (player.isPlaying) player.pause() else player.play()
+                },
+                onSeekBy = { deltaMs ->
+                    onInteraction()
+                    val target = (player.currentPosition + deltaMs)
+                        .coerceIn(0, player.duration.coerceAtLeast(0))
+                    player.seekTo(target)
+                },
+                modifier = Modifier.align(Alignment.BottomCenter)
             )
         }
 
@@ -168,7 +245,7 @@ fun VideoPlayerScreen(match: Match, onClose: () -> Unit) {
                         Text("Couldn't load this match", color = Color.White.copy(alpha = 0.7f), fontSize = 15.sp)
                         Text("The video stream wasn't available.", color = Color.White.copy(alpha = 0.4f), fontSize = 13.sp)
                     } else {
-                        CircularProgressIndicator(color = Color(0xFF22C55E))
+                        CircularProgressIndicator(color = ACCENT_GREEN)
                         Text("Loading match…", color = Color.White.copy(alpha = 0.45f), fontSize = 14.sp)
                     }
                 }
@@ -201,6 +278,189 @@ fun VideoPlayerScreen(match: Match, onClose: () -> Unit) {
             }
         }
     }
+}
+
+// MARK: - Custom playback controls
+//
+// PlayerView's built-in controller doesn't support footballia's TV seek
+// conventions, so this is hand-rolled: the skip buttons jump a fixed ±10s on
+// a tap, but scrub with progressively larger jumps if held; the timeline
+// itself moves in 30s steps via D-pad left/right once it's focused.
+
+@Composable
+private fun VideoControls(
+    visible: Boolean,
+    isPlaying: Boolean,
+    positionMs: Long,
+    durationMs: Long,
+    onPlayPause: () -> Unit,
+    onSeekBy: (Long) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val playPauseFocusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        runCatching { playPauseFocusRequester.requestFocus() }
+    }
+
+    val buttonColors = IconButtonDefaults.colors(
+        containerColor = Color.White.copy(alpha = 0.12f),
+        contentColor = Color.White,
+        focusedContainerColor = ACCENT_GREEN,
+        focusedContentColor = Color.Black
+    )
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .alpha(if (visible) 1f else 0f)
+            .background(
+                Brush.verticalGradient(
+                    0f to Color.Transparent,
+                    1f to Color.Black.copy(alpha = 0.75f)
+                )
+            )
+            .padding(horizontal = 28.dp, vertical = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            SkipButton(direction = -1, colors = buttonColors, onSeekBy = onSeekBy)
+            Spacer(modifier = Modifier.width(28.dp))
+            TvIconButton(
+                onClick = onPlayPause,
+                modifier = Modifier.focusRequester(playPauseFocusRequester),
+                colors = buttonColors
+            ) {
+                Icon(
+                    if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    contentDescription = if (isPlaying) "Pause" else "Play",
+                    modifier = Modifier.size(28.dp)
+                )
+            }
+            Spacer(modifier = Modifier.width(28.dp))
+            SkipButton(direction = 1, colors = buttonColors, onSeekBy = onSeekBy)
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(formatPlaybackTime(positionMs), color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
+            SeekBar(
+                positionMs = positionMs,
+                durationMs = durationMs,
+                onSeekBy = onSeekBy,
+                modifier = Modifier.weight(1f)
+            )
+            Text(formatPlaybackTime(durationMs), color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
+        }
+    }
+}
+
+// Single click seeks by SKIP_MS once. Holding past HOLD_ENGAGE_DELAY_MS starts
+// a repeating seek whose step grows each tick, so a long hold scrubs faster
+// the longer it's held.
+@Composable
+private fun SkipButton(
+    direction: Int,
+    colors: androidx.tv.material3.ButtonColors,
+    onSeekBy: (Long) -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    var holdEngaged by remember { mutableStateOf(false) }
+
+    LaunchedEffect(isPressed) {
+        if (isPressed) {
+            holdEngaged = false
+            delay(HOLD_ENGAGE_DELAY_MS)
+            holdEngaged = true
+            var stepMs = SKIP_MS
+            while (isPressed) {
+                onSeekBy(direction * stepMs)
+                delay(HOLD_TICK_MS)
+                stepMs = (stepMs * 8 / 5).coerceAtMost(HOLD_MAX_STEP_MS)
+            }
+        }
+    }
+
+    TvIconButton(
+        onClick = { if (!holdEngaged) onSeekBy(direction * SKIP_MS) },
+        interactionSource = interactionSource,
+        colors = colors
+    ) {
+        Icon(
+            if (direction < 0) Icons.Default.Replay10 else Icons.Default.Forward10,
+            contentDescription = if (direction < 0) "Back 10 seconds" else "Forward 10 seconds",
+            modifier = Modifier.size(22.dp)
+        )
+    }
+}
+
+@Composable
+private fun SeekBar(
+    positionMs: Long,
+    durationMs: Long,
+    onSeekBy: (Long) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var isFocused by remember { mutableStateOf(false) }
+    val progress = if (durationMs > 0) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
+    val barHeight = if (isFocused) 6.dp else 4.dp
+
+    Box(
+        modifier = modifier
+            .height(20.dp)
+            .onFocusChanged { isFocused = it.isFocused }
+            .focusable()
+            .onKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
+                when (event.key) {
+                    Key.DirectionLeft -> { onSeekBy(-seekBarHoldStepMs(event)); true }
+                    Key.DirectionRight -> { onSeekBy(seekBarHoldStepMs(event)); true }
+                    else -> false
+                }
+            },
+        contentAlignment = Alignment.CenterStart
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(barHeight)
+                .clip(RoundedCornerShape(50))
+                .background(Color.White.copy(alpha = 0.25f))
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(progress)
+                .height(barHeight)
+                .clip(RoundedCornerShape(50))
+                .background(ACCENT_GREEN)
+        )
+    }
+}
+
+// D-pad key-repeat events carry the original downTime alongside each repeat's
+// eventTime, so the true hold duration is derived from the native event rather
+// than tracked by hand. Step size ramps linearly from SEEK_BAR_MIN_STEP_MS at
+// press to SEEK_BAR_MAX_STEP_MS once held past SEEK_BAR_RAMP_MS.
+private fun seekBarHoldStepMs(event: androidx.compose.ui.input.key.KeyEvent): Long {
+    val heldMs = (event.nativeKeyEvent.eventTime - event.nativeKeyEvent.downTime).coerceAtLeast(0)
+    val fraction = (heldMs.toFloat() / SEEK_BAR_RAMP_MS).coerceIn(0f, 1f)
+    return (SEEK_BAR_MIN_STEP_MS + (SEEK_BAR_MAX_STEP_MS - SEEK_BAR_MIN_STEP_MS) * fraction).toLong()
+}
+
+private fun formatPlaybackTime(ms: Long): String {
+    if (ms <= 0) return "0:00"
+    val totalSeconds = ms / 1000
+    val h = totalSeconds / 3600
+    val m = (totalSeconds % 3600) / 60
+    val s = totalSeconds % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
 }
 
 // JS adapted from VideoPlayerView.swift — replaces window.webkit.messageHandlers

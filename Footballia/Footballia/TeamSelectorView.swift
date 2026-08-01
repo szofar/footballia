@@ -5,7 +5,7 @@ struct TeamSelectorView: View {
     let selectedSlug: String?
     let onSelect: (String?) -> Void
 
-    private let rows = [GridItem(.fixed(72)), GridItem(.fixed(72))]
+    private let rows = [GridItem(.fixed(72))]
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -20,7 +20,7 @@ struct TeamSelectorView: View {
             .padding(.horizontal, 28)
             .padding(.vertical, 10)
         }
-        .frame(height: 164)
+        .frame(height: 92)
         .background(Color(red: 0.07, green: 0.07, blue: 0.09))
         .overlay(alignment: .bottom) {
             Rectangle()

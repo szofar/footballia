@@ -85,6 +85,15 @@ class FootballiaRepository {
         html.isNotEmpty() && !html.contains("<span>Sign in</span>")
     }
 
+    /**
+     * The calendar page renders a "This is a Master feature" upsell banner in place of the
+     * actual calendar for accounts without a Master subscription.
+     */
+    suspend fun checkMasterAccess(): Boolean = withContext(Dispatchers.IO) {
+        val html = fetchHtml("$BASE_URL/calendar?locale=en")
+        html.isNotEmpty() && !html.contains("This is a Master feature")
+    }
+
     // MARK: - HTML fetch
 
     suspend fun fetchHtml(url: String): String = withContext(Dispatchers.IO) {

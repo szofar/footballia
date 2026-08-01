@@ -119,7 +119,7 @@ fun CalendarScreen(viewModel: FootballiaViewModel, onMatchSelect: (Match) -> Uni
                     }
                 }
                 if (!viewModel.isLoadingMatches) {
-                    items(viewModel.matches, key = { "match_${it.id}" }) { match ->
+                    items(viewModel.matches.asReversed(), key = { "match_${it.id}" }) { match ->
                         VideoCardView(match = match, onClick = { onMatchSelect(match) })
                     }
                 }

@@ -147,8 +147,6 @@ struct CalendarView: View {
 
     @ViewBuilder
     private func matchesForDay(_ day: Int) -> some View {
-        let dateStr = String(format: "%04d-%02d-%02d",
-                             service.calendarYear, service.calendarMonth, day)
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text("\(monthName) \(day)")

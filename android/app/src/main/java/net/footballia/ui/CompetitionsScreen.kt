@@ -63,8 +63,14 @@ fun CompetitionsScreen(viewModel: FootballiaViewModel, onMatchSelect: (Match) ->
                 hasNextPage = viewModel.hasNextPage,
                 isReversed = viewModel.paginationReversed,
                 onMatchSelect = onMatchSelect,
-                onNextPage = { viewModel.loadMatches(MatchFilter.ByCompetition(comp.slug), viewModel.currentPage + 1) },
-                onPreviousPage = { viewModel.loadMatches(MatchFilter.ByCompetition(comp.slug), viewModel.currentPage - 1) }
+                onNextPage = {
+                    val next = if (viewModel.paginationReversed) viewModel.currentPage - 1 else viewModel.currentPage + 1
+                    viewModel.loadMatches(MatchFilter.ByCompetition(comp.slug), next)
+                },
+                onPreviousPage = {
+                    val prev = if (viewModel.paginationReversed) viewModel.currentPage + 1 else viewModel.currentPage - 1
+                    viewModel.loadMatches(MatchFilter.ByCompetition(comp.slug), prev)
+                }
             )
         }
     } else {

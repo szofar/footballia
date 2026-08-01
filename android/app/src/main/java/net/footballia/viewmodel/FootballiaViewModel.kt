@@ -1,23 +1,28 @@
 package net.footballia.viewmodel
 
+import android.app.Application
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.launch
 import net.footballia.data.*
 import java.util.Calendar
 
-class FootballiaViewModel : ViewModel() {
+class FootballiaViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repo = FootballiaRepository()
+    private val favoritesStore = FavoritesStore(application)
 
     // Auth
     var isLoggedIn by mutableStateOf(false); private set
     var isCheckingSession by mutableStateOf(true); private set
     var isLoading by mutableStateOf(false); private set
     var loginError by mutableStateOf<String?>(null); private set
+
+    // Whether the account has a Footballia Master subscription; null while still checking.
+    var hasMasterAccess by mutableStateOf<Boolean?>(null); private set
 
     /**
      * Startup entry point. Tries to restore a persisted session from stored cookies first; only if
@@ -28,7 +33,8 @@ class FootballiaViewModel : ViewModel() {
             val restored = runCatching { repo.restoreSession() }.getOrDefault(false)
             if (restored) {
                 isLoggedIn = true
-                launch { runCatching { featuredTeams = repo.loadFeaturedTeams() } }
+                launch { loadFavoriteTeams() }
+                launch { runCatching { hasMasterAccess = repo.checkMasterAccess() } }
                 loadMatches()
             }
             isCheckingSession = false
@@ -46,8 +52,8 @@ class FootballiaViewModel : ViewModel() {
     var paginationReversed by mutableStateOf(false); private set
     var currentFilter by mutableStateOf<MatchFilter>(MatchFilter.All); private set
 
-    // Featured teams
-    var featuredTeams by mutableStateOf<List<Team>>(emptyList()); private set
+    // Favorite teams (cached locally; seeded from the site's featured teams on first launch)
+    var favoriteTeams by mutableStateOf<List<Team>>(emptyList()); private set
 
     // Competitions
     var competitionCategories by mutableStateOf<List<CompetitionCategory>>(emptyList()); private set
@@ -78,7 +84,8 @@ class FootballiaViewModel : ViewModel() {
                 .onSuccess { success ->
                     if (success) {
                         isLoggedIn = true
-                        launch { runCatching { featuredTeams = repo.loadFeaturedTeams() } }
+                        launch { loadFavoriteTeams() }
+                        launch { runCatching { hasMasterAccess = repo.checkMasterAccess() } }
                         loadMatches()
                     } else {
                         loginError = "Invalid email or password."
@@ -91,11 +98,24 @@ class FootballiaViewModel : ViewModel() {
 
     fun logout() {
         isLoggedIn = false
-        matches = emptyList(); featuredTeams = emptyList(); competitionCategories = emptyList()
+        matches = emptyList(); favoriteTeams = emptyList(); competitionCategories = emptyList()
         searchResults = emptyList(); searchSuggestions = emptyList(); calendarMatchDays = emptySet()
         currentPage = 1; hasNextPage = false; paginationReversed = false
         currentFilter = MatchFilter.All; activeSuggestion = null
+        hasMasterAccess = null
         repo.clearCookies()
+    }
+
+    /** Loads the cached favorite-teams list, seeding the cache from the site on first launch. */
+    private suspend fun loadFavoriteTeams() {
+        val cached = runCatching { favoritesStore.loadTeams() }.getOrNull()
+        if (cached != null) {
+            favoriteTeams = cached
+            return
+        }
+        val fetched = runCatching { repo.loadFeaturedTeams() }.getOrDefault(emptyList())
+        favoriteTeams = fetched
+        if (fetched.isNotEmpty()) runCatching { favoritesStore.saveTeams(fetched) }
     }
 
     fun loadMatches(filter: MatchFilter? = null, page: Int = 1) {

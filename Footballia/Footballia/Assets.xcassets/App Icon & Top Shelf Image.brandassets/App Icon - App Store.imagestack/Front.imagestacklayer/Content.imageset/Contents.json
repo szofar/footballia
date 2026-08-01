@@ -1,13 +1,9 @@
 {
   "images" : [
     {
-      "filename" : "icon_tv_800x480.png",
+      "filename" : "transparent_1280x768.png",
       "idiom" : "tv",
       "scale" : "1x"
-    },
-    {
-      "idiom" : "tv",
-      "scale" : "2x"
     }
   ],
   "info" : {

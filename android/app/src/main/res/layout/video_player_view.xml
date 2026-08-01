@@ -12,6 +12,5 @@
     android:layout_height="match_parent"
     app:surface_type="texture_view"
     app:resize_mode="fit"
-    app:use_controller="true"
-    app:auto_show="true"
+    app:use_controller="false"
     app:show_buffering="when_playing" />
