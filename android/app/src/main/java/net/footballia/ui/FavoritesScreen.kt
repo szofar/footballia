@@ -9,7 +9,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -58,7 +58,7 @@ fun FavoritesScreen(viewModel: FootballiaViewModel, onMatchSelect: (Match) -> Un
                     onClick = { selectedTeam = null },
                     modifier = Modifier.focusRequester(backFocusRequester)
                 ) {
-                    Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White.copy(alpha = 0.6f))
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White.copy(alpha = 0.6f))
                 }
                 Text(team.name, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
                 if (viewModel.isLoadingMatches) {

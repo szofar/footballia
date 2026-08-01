@@ -117,11 +117,16 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
     var searchPaginationReversed by mutableStateOf(true); private set
     var activeSuggestion by mutableStateOf<SearchSuggestion?>(null); private set
 
-    // Calendar
+    // Calendar. Backed by a per-year event feed (one fetch per year, then cached), so switching
+    // months and picking a day are both instant and never hit an endpoint that ignores the date.
+    private val calendarCache = mutableMapOf<Int, Map<String, List<Match>>>()
     var calendarMatchDays by mutableStateOf<Set<Int>>(emptySet()); private set
+    var calendarSelectedDay by mutableStateOf<Int?>(null); private set
+    var calendarMatches by mutableStateOf<List<Match>>(emptyList()); private set
     var calendarYear by mutableStateOf(Calendar.getInstance().get(Calendar.YEAR)); private set
     var calendarMonth by mutableStateOf(Calendar.getInstance().get(Calendar.MONTH) + 1); private set
     var isLoadingCalendar by mutableStateOf(false); private set
+    private var calendarStarted = false
 
     fun login(email: String, password: String) {
         viewModelScope.launch {
@@ -149,6 +154,8 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
         isLoggedIn = false
         matches = emptyList(); favoriteTeams = emptyList(); competitionCategories = emptyList()
         searchResults = emptyList(); searchSuggestions = emptyList(); calendarMatchDays = emptySet()
+        calendarCache.clear(); calendarStarted = false
+        calendarSelectedDay = null; calendarMatches = emptyList()
         currentPage = 1; hasNextPage = false; paginationReversed = false
         currentFilter = MatchFilter.All; activeSuggestion = null
         favoritesLoaded = false
@@ -165,10 +172,14 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     /**
-     * Loads the cached favorite-teams list, seeding the cache from the site on first launch.
+     * Loads the favourites list from disk, seeding it on a first run only.
      *
-     * A cached empty list is honoured rather than re-seeded: it means the user cleared the list
-     * on purpose, and silently repopulating it would make "Clear All" look broken.
+     * The list is app-local: footballia.eu has no way to set favourites, so there is nothing to
+     * sync with and the cache is the only source of truth. The homepage's featured-teams strip
+     * seeds it once, after which every change comes from the Profile tab.
+     *
+     * Seeding keys off the *presence of the cache key*, not a non-empty list — otherwise
+     * "Clear All" would be silently undone by the next launch.
      */
     private suspend fun loadFavoriteTeams() {
         val cached = runCatching { localStore.loadTeams() }.getOrNull()
@@ -177,9 +188,10 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
             favoritesLoaded = true
             return
         }
+
         val fetched = runCatching { repo.loadFeaturedTeams() }.getOrDefault(emptyList())
-        // The user may have edited the list from the Profile tab while the homepage fetch was
-        // in flight; `favoritesLoaded` marks the list as theirs, so the seed must not win.
+        // The user may have edited the list from the Profile tab while the fetch was in
+        // flight; `favoritesLoaded` marks the list as theirs, so the seed must not win.
         if (favoritesLoaded) return
         if (fetched.isNotEmpty()) {
             favoriteTeams = fetched
@@ -263,7 +275,7 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
         updateFavoriteTeams(emptyList())
     }
 
-    /** Restores the default list: the site's current featured-teams strip. */
+    /** Re-seeds the list from the site's featured-teams strip, discarding the user's edits. */
     fun restoreDefaultFavoriteTeams() {
         viewModelScope.launch {
             val fetched = runCatching { repo.loadFeaturedTeams() }.getOrDefault(emptyList())
@@ -290,11 +302,20 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    /**
+     * Loads a filter's newest matches (the site paginates oldest-first, so that's its last page).
+     *
+     * State is reset synchronously, before the coroutine starts, so the drill-down never renders
+     * one frame of the previous screen's matches while the request is in flight.
+     */
     fun loadMatchesLastPage(filter: MatchFilter) {
         currentFilter = filter
         paginationReversed = true
+        matches = emptyList()
+        currentPage = 1
+        hasNextPage = false
+        isLoadingMatches = true
         viewModelScope.launch {
-            isLoadingMatches = true
             runCatching { repo.loadMatchesLastPage(filter) }
                 .onSuccess { (parsed, page, hasNext) ->
                     if (parsed.isNotEmpty()) matches = parsed
@@ -337,8 +358,10 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
         activeSuggestion = suggestion
         searchResults = emptyList()
         searchPaginationReversed = true
+        searchCurrentPage = 1
+        searchHasNextPage = false
+        isLoadingSearchMatches = true
         viewModelScope.launch {
-            isLoadingSearchMatches = true
             runCatching { repo.loadMatchesForSuggestion(suggestion) }
                 .onSuccess { (m, page, hasNext) ->
                     searchResults = m; searchCurrentPage = page; searchHasNextPage = hasNext
@@ -366,15 +389,85 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
         searchCurrentPage = 1; searchHasNextPage = false
     }
 
-    fun loadCalendar(year: Int = calendarYear, month: Int = calendarMonth) {
+    /**
+     * Opens the calendar on the most recent month that actually has matches.
+     *
+     * The archive lags real time (uploads trail fixtures by a few weeks), so landing on today's
+     * month would usually show an empty grid. The latest date not in the future is used instead,
+     * falling back to the previous year if the current one hasn't been populated yet.
+     */
+    fun startCalendar() {
+        if (calendarStarted) return
+        calendarStarted = true
         viewModelScope.launch {
             isLoadingCalendar = true
-            runCatching { repo.loadCalendar(year, month) }
-                .onSuccess { result ->
-                    calendarYear = result.year; calendarMonth = result.month
-                    calendarMatchDays = result.days
-                }
+            val today = Calendar.getInstance()
+            val thisYear = today.get(Calendar.YEAR)
+            val todayIso = String.format(
+                "%04d-%02d-%02d", thisYear, today.get(Calendar.MONTH) + 1, today.get(Calendar.DAY_OF_MONTH)
+            )
+
+            var landing: String? = null
+            for (year in listOf(thisYear, thisYear - 1)) {
+                val data = fetchCalendarYear(year)
+                landing = data.keys.filter { it <= todayIso }.maxOrNull() ?: data.keys.maxOrNull()
+                if (landing != null) break
+            }
+
+            if (landing != null) {
+                calendarYear = landing.take(4).toInt()
+                calendarMonth = landing.substring(5, 7).toInt()
+            } else if (hasMasterAccess != false) {
+                // Nothing loaded and the account isn't gated, so this was a failed fetch —
+                // let the next visit try again instead of leaving an empty grid forever.
+                calendarStarted = false
+            }
+            refreshCalendarMonth()
             isLoadingCalendar = false
         }
+    }
+
+    fun loadCalendar(year: Int, month: Int) {
+        calendarYear = year
+        calendarMonth = month
+        calendarSelectedDay = null
+        calendarMatches = emptyList()
+        viewModelScope.launch {
+            isLoadingCalendar = true
+            fetchCalendarYear(year)
+            refreshCalendarMonth()
+            isLoadingCalendar = false
+        }
+    }
+
+    /** Selecting a day is a pure lookup in the cached year — no request, no unfiltered results. */
+    fun selectCalendarDay(day: Int?) {
+        calendarSelectedDay = day
+        calendarMatches = if (day == null) emptyList() else {
+            val key = String.format("%04d-%02d-%02d", calendarYear, calendarMonth, day)
+            calendarCache[calendarYear]?.get(key).orEmpty()
+        }
+    }
+
+    private suspend fun fetchCalendarYear(year: Int): Map<String, List<Match>> {
+        calendarCache[year]?.let { return it }
+        val result = runCatching { repo.loadCalendarYear(year) }.getOrNull()
+        if (result != null && result.isMasterGated) {
+            hasMasterAccess = false
+            runCatching { localStore.saveMasterAccess(false) }
+            return emptyMap()
+        }
+        val data = result?.matchesByDate.orEmpty()
+        // Only a successful fetch is cached, so a network blip retries instead of sticking empty.
+        if (data.isNotEmpty()) calendarCache[year] = data
+        return data
+    }
+
+    private fun refreshCalendarMonth() {
+        val prefix = String.format("%04d-%02d-", calendarYear, calendarMonth)
+        calendarMatchDays = calendarCache[calendarYear].orEmpty().keys
+            .filter { it.startsWith(prefix) }
+            .mapNotNull { it.substring(8).toIntOrNull() }
+            .toSet()
     }
 }

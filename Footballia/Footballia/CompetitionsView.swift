@@ -110,13 +110,43 @@ struct CompetitionsView: View {
             }
             .padding(.horizontal, 28)
 
+            ForEach(category.groups) { group in
+                groupSection(group)
+            }
+        }
+    }
+
+    /// One sub-heading of a category — a country under Domestic, a continent under the
+    /// national-team columns — followed by its competitions.
+    ///
+    /// The site only ships country flags as a CSS sprite sheet, with no image URL to load, so
+    /// the flag is rendered from the sprite's country code as a Unicode flag instead. A group
+    /// with no name (a flat category such as "Others") skips the separator entirely.
+    @ViewBuilder
+    private func groupSection(_ group: CompetitionGroup) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if !group.name.isEmpty {
+                HStack(spacing: 8) {
+                    if let flag = group.flagEmoji {
+                        Text(verbatim: flag).font(.system(size: 15))
+                    }
+                    Text(group.name)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.75))
+                    Rectangle()
+                        .fill(Color.white.opacity(0.05))
+                        .frame(height: 1)
+                }
+                .padding(.horizontal, 28)
+            }
+
             // Competition cards in a horizontal flow
             let columns = [GridItem(.adaptive(minimum: 160, maximum: 220), spacing: 12)]
             LazyVGrid(columns: columns, spacing: 12) {
-                ForEach(category.competitions) { comp in
+                ForEach(group.competitions) { comp in
                     CompetitionCard(competition: comp) {
+                        service.loadMatchesLastPage(filter: .competition(comp.slug))
                         selectedCompetition = comp
-                        Task { await service.loadMatchesLastPage(filter: .competition(comp.slug)) }
                     }
                 }
             }

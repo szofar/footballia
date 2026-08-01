@@ -4,11 +4,8 @@ struct MainView: View {
     @Environment(FootballiaService.self) private var service
     @State private var selectedSection: SidebarSection = .favorites
     @State private var selectedMatch: Match? = nil
-    @State private var didApplyInitialSection = false
 
-    private var sections: [SidebarSection] {
-        SidebarSection.ordered(hasMasterAccess: service.hasMasterAccess)
-    }
+    private let sections = SidebarSection.ordered
 
     var body: some View {
         ZStack {
@@ -33,13 +30,6 @@ struct MainView: View {
         #if os(macOS)
         .frame(minWidth: 1000, idealWidth: 1280, minHeight: 660, idealHeight: 800)
         #endif
-        // Land on the first tab for this entitlement, but only once, so the user is
-        // never yanked off a tab they navigated to themselves.
-        .onChange(of: service.didCheckMasterAccess, initial: true) { _, checked in
-            guard checked, !didApplyInitialSection else { return }
-            didApplyInitialSection = true
-            selectedSection = sections.first ?? .favorites
-        }
     }
 
     #if os(tvOS)

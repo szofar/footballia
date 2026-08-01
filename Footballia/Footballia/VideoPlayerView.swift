@@ -12,12 +12,6 @@ struct VideoPlayerOverlay: View {
 
     @State private var nativeStreamURL: URL?
     @State private var isLoading = true
-    #if os(macOS)
-    @State private var avPlayerView: AVPlayerView? = nil
-    @State private var fsController: VideoFullScreenController? = nil
-    #elseif os(iOS)
-    @State private var isFullScreen = false
-    #endif
 
     var body: some View {
         #if os(tvOS)
@@ -72,44 +66,14 @@ struct VideoPlayerOverlay: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            #if os(iOS)
-            if isFullScreen {
-                ZStack(alignment: .topLeading) {
-                    sharedVideoContent
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .ignoresSafeArea()
-
-                    Button(action: { isFullScreen = false }) {
-                        Image(systemName: "arrow.down.right.and.arrow.up.left")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundColor(.white.opacity(0.85))
-                            .padding(10)
-                            .background(Color.black.opacity(0.55))
-                            .clipShape(Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.top, 54)
-                    .padding(.leading, 16)
-                }
-            } else {
-                VStack(spacing: 0) {
-                    topBar
-                    sharedVideoContent
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-            }
-            #else
             VStack(spacing: 0) {
                 topBar
                 sharedVideoContent
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            #endif
         }
-        #if os(iOS)
-        .ignoresSafeArea(edges: isFullScreen ? .all : [])
-        .statusBarHidden(isFullScreen)
-        #endif
+        .onAppear { ScreenSleepBlocker.shared.begin() }
+        .onDisappear { ScreenSleepBlocker.shared.end() }
     }
 
     private var sharedVideoContent: some View {
@@ -132,15 +96,8 @@ struct VideoPlayerOverlay: View {
             }
 
             if let streamURL = nativeStreamURL {
-                #if os(macOS)
-                NativeVideoPlayer(url: streamURL) { view in
-                    avPlayerView = view
-                }
-                .transition(.opacity)
-                #else
                 NativeVideoPlayer(url: streamURL)
                     .transition(.opacity)
-                #endif
             }
 
             if isLoading {
@@ -180,34 +137,15 @@ struct VideoPlayerOverlay: View {
 
             Spacer()
 
-            // Invisible mirror keeps title centred; fullscreen button overlaid
+            // Invisible mirror of the back button keeps the title centred.
+            // No fullscreen control here: the player draws its own, and two of them
+            // side by side is what the duplicate looked like.
             HStack(spacing: 5) {
                 Image(systemName: "chevron.left")
                 Text("Library")
             }
             .font(.system(size: 14))
             .opacity(0)
-            .overlay(alignment: .trailing) {
-                #if os(macOS)
-                Button {
-                    guard let playerView = avPlayerView, let player = playerView.player else { return }
-                    fsController = VideoFullScreenController(player: player, inlineView: playerView)
-                } label: {
-                    Image(systemName: "arrow.up.left.and.arrow.down.right")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.white.opacity(avPlayerView != nil ? 0.65 : 0.2))
-                }
-                .buttonStyle(.plain)
-                .disabled(avPlayerView == nil)
-                #elseif os(iOS)
-                Button { isFullScreen = true } label: {
-                    Image(systemName: "arrow.up.left.and.arrow.down.right")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.65))
-                }
-                .buttonStyle(.plain)
-                #endif
-            }
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 14)
@@ -229,103 +167,50 @@ struct VideoPlayerOverlay: View {
     }
 }
 
-// MARK: - macOS fullscreen controller
+// MARK: - Screen sleep
 
-#if os(macOS)
+#if !os(tvOS)
+/// Keeps the display awake for the lifetime of the player overlay.
+///
+/// The stream is fed to AVPlayer from a WebView-extracted URL rather than being played by the
+/// system's own media pipeline in a way it associates with the app being "active", so neither
+/// platform reliably infers that video is on screen — the display would dim and sleep mid-match.
+/// Reference-counted because the overlay can be re-created (e.g. on a stream retry) before the
+/// outgoing instance's `onDisappear` runs.
+@MainActor
+final class ScreenSleepBlocker {
+    static let shared = ScreenSleepBlocker()
+    private var count = 0
+    #if os(macOS)
+    private var activity: NSObjectProtocol?
+    #endif
 
-/// Self-contained AppKit controller for fullscreen video.
-/// Owns the window, the fullscreen AVPlayerView, the key monitor, and the player
-/// reference — nothing is read back from SwiftUI during teardown, which is the
-/// cause of the use-after-free crashes seen with the NSHostingView approach.
-final class VideoFullScreenController: NSObject, NSWindowDelegate {
-    private var window: NSWindow?
-    private var keyMonitor: Any?
-    private let player: AVPlayer
-    private var fullScreenView: AVPlayerView?
-    private weak var inlineView: AVPlayerView?
+    private init() {}
 
-    init(player: AVPlayer, inlineView: AVPlayerView) {
-        self.player = player
-        self.inlineView = inlineView
-        super.init()
-        present(on: inlineView)
-    }
-
-    private func present(on inlineView: AVPlayerView) {
-        guard let screen = NSScreen.main else { return }
-        let bounds = CGRect(origin: .zero, size: screen.frame.size)
-
-        NSApp.presentationOptions = [.autoHideMenuBar, .autoHideDock]
-
-        inlineView.player = nil
-        let fsView = AVPlayerView(frame: bounds)
-        fsView.player = player
-        fsView.controlsStyle = .floating
-        fsView.autoresizingMask = [.width, .height]
-        self.fullScreenView = fsView
-
-        let container = NSView(frame: bounds)
-        container.addSubview(fsView)
-
-        let btn = makeExitButton(screenHeight: screen.frame.size.height)
-        container.addSubview(btn)
-
-        let w = NSWindow(
-            contentRect: screen.frame,
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false
+    func begin() {
+        count += 1
+        guard count == 1 else { return }
+        #if os(macOS)
+        activity = ProcessInfo.processInfo.beginActivity(
+            options: [.idleDisplaySleepDisabled, .idleSystemSleepDisabled, .userInitiated],
+            reason: "Playing a match"
         )
-        w.level = NSWindow.Level(rawValue: NSWindow.Level.mainMenu.rawValue + 2)
-        w.backgroundColor = .black
-        w.isOpaque = true
-        w.contentView = container
-        w.delegate = self
-        w.makeKeyAndOrderFront(nil)
-        self.window = w
-
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 53 { self?.dismiss(); return nil }
-            return event
-        }
+        #else
+        UIApplication.shared.isIdleTimerDisabled = true
+        #endif
     }
 
-    private func makeExitButton(screenHeight: CGFloat) -> NSButton {
-        let btn = NSButton(frame: NSRect(x: 18, y: screenHeight - 50, width: 152, height: 32))
-        btn.title = "⤡  Exit Fullscreen"
-        btn.bezelStyle = .rounded
-        btn.wantsLayer = true
-        btn.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.55).cgColor
-        btn.layer?.cornerRadius = 16
-        btn.contentTintColor = .white
-        btn.font = NSFont.systemFont(ofSize: 13, weight: .medium)
-        btn.isBordered = false
-        btn.target = self
-        btn.action = #selector(dismiss)
-        return btn
-    }
-
-    @objc func dismiss() {
-        guard let w = window else { return }
-        window = nil
-
-        NSApp.presentationOptions = []
-
-        if let monitor = keyMonitor { NSEvent.removeMonitor(monitor); keyMonitor = nil }
-
-        fullScreenView?.player = nil
-        fullScreenView = nil
-        inlineView?.player = player
-
-        DispatchQueue.main.async { w.close() }
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        guard window != nil else { return }
-        dismiss()
+    func end() {
+        count = max(0, count - 1)
+        guard count == 0 else { return }
+        #if os(macOS)
+        if let activity { ProcessInfo.processInfo.endActivity(activity) }
+        activity = nil
+        #else
+        UIApplication.shared.isIdleTimerDisabled = false
+        #endif
     }
 }
-
 #endif
 
 // MARK: - Shared WebView coordinator (macOS + iOS)
@@ -437,7 +322,6 @@ struct WebVideoPlayer: NSViewRepresentable {
 
 struct NativeVideoPlayer: NSViewRepresentable {
     let url: URL
-    var onReady: ((AVPlayerView) -> Void)? = nil
 
     func makeNSView(context: Context) -> AVPlayerView {
         let view = AVPlayerView()
@@ -445,7 +329,6 @@ struct NativeVideoPlayer: NSViewRepresentable {
         view.player = player
         view.controlsStyle = .floating
         player.play()
-        DispatchQueue.main.async { self.onReady?(view) }
         return view
     }
 
@@ -592,6 +475,7 @@ final class TVVideoPlayerViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        UIApplication.shared.isIdleTimerDisabled = true
         setupPlayer()
         setupControls()
         setupSwipeGestures()
@@ -760,6 +644,7 @@ final class TVVideoPlayerViewController: UIViewController {
     }
 
     deinit {
+        UIApplication.shared.isIdleTimerDisabled = false
         if let obs = timeObserver { player.removeTimeObserver(obs) }
         holdTimer?.invalidate()
         hideTimer?.invalidate()

@@ -30,28 +30,17 @@ private enum class NavSection(val label: String, val icon: ImageVector) {
     PROFILE("Profile", Icons.Default.Person)
 }
 
-// Master accounts get the Calendar first; everyone else gets Favorites first, with Calendar
-// demoted to a locked placeholder (see CalendarLockedView below).
-private fun navOrder(hasMasterAccess: Boolean): List<NavSection> = if (hasMasterAccess) {
-    listOf(NavSection.CALENDAR, NavSection.FAVORITES, NavSection.COMPETITIONS, NavSection.SEARCH, NavSection.PROFILE)
-} else {
-    listOf(NavSection.FAVORITES, NavSection.COMPETITIONS, NavSection.CALENDAR, NavSection.SEARCH, NavSection.PROFILE)
-}
+private val fixedNavOrder = listOf(
+    NavSection.FAVORITES, NavSection.COMPETITIONS, NavSection.CALENDAR, NavSection.SEARCH, NavSection.PROFILE
+)
 
 @OptIn(ExperimentalTvMaterial3Api::class, ExperimentalComposeUiApi::class)
 @Composable
 fun MainScreen(viewModel: FootballiaViewModel) {
-    val hasMasterAccess = viewModel.hasMasterAccess
+    val hasMasterAccess = viewModel.hasMasterAccess ?: false
 
-    if (hasMasterAccess == null) {
-        Box(modifier = Modifier.fillMaxSize().background(Color(0xFF0A0A0D)), contentAlignment = androidx.compose.ui.Alignment.Center) {
-            androidx.compose.material3.CircularProgressIndicator(color = Color(0xFF22C55E))
-        }
-        return
-    }
-
-    val sections = remember(hasMasterAccess) { navOrder(hasMasterAccess) }
-    var selectedSection by remember(hasMasterAccess) { mutableStateOf(sections.first()) }
+    val sections = fixedNavOrder
+    var selectedSection by remember { mutableStateOf(sections.first()) }
     var selectedMatch by remember { mutableStateOf<Match?>(null) }
 
     Box(modifier = Modifier.fillMaxSize().background(Color(0xFF0A0A0D))) {

@@ -4,7 +4,10 @@ import android.webkit.CookieManager as WebViewCookieManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.*
+import org.json.JSONArray
 import java.net.URLEncoder
+import java.text.DateFormatSymbols
+import java.util.Locale
 
 class FootballiaRepository {
 
@@ -135,7 +138,7 @@ class FootballiaRepository {
 
     suspend fun loadMatches(filter: MatchFilter = MatchFilter.All, page: Int = 1): Pair<List<Match>, Boolean> =
         withContext(Dispatchers.IO) {
-            val url = "$BASE_URL${filter.urlPath}?locale=en&page=$page${filter.extraQuery}"
+            val url = "$BASE_URL${filter.urlPath}?locale=en&page=$page"
             val html = fetchHtml(url)
             Pair(parseMatchCards(html), html.contains("rel=\"next\""))
         }
@@ -215,17 +218,24 @@ class FootballiaRepository {
 
     // MARK: - Calendar
 
-    data class CalendarResult(val days: Set<Int>, val year: Int, val month: Int)
+    /**
+     * A year's worth of calendar matches, keyed by ISO `yyyy-MM-dd`.
+     *
+     * The calendar page is a FullCalendar widget: `/calendar/<year>` embeds every match of that
+     * year in a JS `events: [...]` array. There is no per-day endpoint — `?date=` is ignored by
+     * the server — so a single fetch per year backs both the highlighted days and the match list.
+     */
+    data class CalendarYear(
+        val year: Int,
+        val matchesByDate: Map<String, List<Match>> = emptyMap(),
+        val isMasterGated: Boolean = false
+    )
 
-    suspend fun loadCalendar(year: Int, month: Int): CalendarResult = withContext(Dispatchers.IO) {
-        val dateStr = String.format("%04d-%02d-01", year, month)
-        val html = fetchHtml("$BASE_URL/calendar?date=$dateStr&locale=en")
-        val days = parseCalendarDays(html, year, month)
-        if (days.isNotEmpty()) return@withContext CalendarResult(days, year, month)
-
-        val fbHtml = fetchHtml("$BASE_URL/calendar?locale=en")
-        val (fy, fm) = extractCalendarYearMonth(fbHtml) ?: Pair(year, month)
-        CalendarResult(parseCalendarDays(fbHtml, fy, fm), fy, fm)
+    suspend fun loadCalendarYear(year: Int): CalendarYear = withContext(Dispatchers.IO) {
+        val html = runCatching { fetchHtml("$BASE_URL/calendar/$year?locale=en") }.getOrDefault("")
+        if (html.isEmpty()) return@withContext CalendarYear(year)
+        if (isMasterGated(html)) return@withContext CalendarYear(year, isMasterGated = true)
+        CalendarYear(year, parseCalendarEvents(html, year))
     }
 
     // MARK: - HTML parsers
@@ -424,29 +434,103 @@ class FootballiaRepository {
     private fun cleanTeamName(raw: String): String =
         raw.replace(" full matches", "").replace(" matches", "").trim()
 
+    /**
+     * Parses the competitions mega-menu, which nests two levels deep:
+     *
+     * ```
+     * <div class="col-md-3"><h5>Domestic</h5><ul class="links">
+     *   <li>Europe</li>
+     *   <ul class="ul-toggle … sub-menu">
+     *     <li data-keep-open="true"><a title="England"><span class="flag flag-england"></span>England</a>
+     *       <ul class="links" style="display:none;"><li><a href="/competitions/fa-cup" …>FA Cup</a></li>…</ul>
+     * ```
+     *
+     * The Domestic column groups by country (each with a flag sprite class); the national-team
+     * columns group by continent with plain `<li>Europe</li>` headings; "Others" is a flat list
+     * and becomes a single unnamed group.
+     *
+     * Each column is bounded at its closing `</ul></div>` rather than a fixed character budget —
+     * Domestic alone carries ~280 competitions and was previously truncated mid-list.
+     */
     private fun parseCompetitions(html: String): List<CompetitionCategory> {
         val categories = mutableListOf<CompetitionCategory>()
         val seenSlugs = mutableSetOf<String>()
 
-        for (chunk in html.split("col-md-3").drop(1)) {
+        for (chunk in html.split("<div class=\"col-md-3\">").drop(1)) {
             if (!chunk.contains("href=\"/competitions/")) continue
-            val window = chunk.take(16000)
-            val categoryName = (extractFirst("<h[4-6][^>]*>\\s*([^<]+)\\s*</h[4-6]>", window) ?: "Other").trim()
-            val comps = mutableListOf<Competition>()
+            val end = chunk.indexOf("</ul></div>").takeIf { it >= 0 } ?: chunk.length
+            val column = chunk.substring(0, end)
+            val categoryName = (extractFirst("<h[4-6][^>]*>\\s*([^<]+)\\s*</h[4-6]>", column) ?: "Other").trim()
 
-            for (part in window.split("href=\"/competitions/").drop(1)) {
-                val slug = part.takeWhile { it != '"' && it != '?' && it != '/' }
-                if (slug.isEmpty() || slug in seenSlugs) continue
-                seenSlugs += slug
-                val name = (extractFirst("""title="([^"]+)"""", part.take(200))
-                    ?: extractFirst(">([^<]{2,60})<", part.take(100))
-                    ?: slug.split("-").joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }).trim()
-                comps += Competition(id = slug, slug = slug, name = name, logoPath = "")
+            val groups = parseCompetitionGroups(column, categoryName, seenSlugs)
+            if (groups.isNotEmpty()) {
+                categories += CompetitionCategory(id = categoryName, name = categoryName, groups = groups)
             }
-            if (comps.isNotEmpty()) categories += CompetitionCategory(id = categoryName, name = categoryName, competitions = comps)
         }
         return categories
     }
+
+    /**
+     * Splits one catalogue column into its sub-headings.
+     *
+     * Headings are matched in document order so competitions attach to the heading that precedes
+     * them; anything before the first heading becomes an unnamed leading group, which is how a
+     * flat column ("Others") ends up as a single group.
+     */
+    private fun parseCompetitionGroups(
+        column: String,
+        categoryName: String,
+        seenSlugs: MutableSet<String>
+    ): List<CompetitionGroup> {
+        // A continent heading (`<li>Europe</li>`) or a country row (`<a title="England"><span
+        // class="flag flag-england" …>`). Country rows carry the sprite class; continents don't.
+        val heading = Regex(
+            """<li>([^<>]{2,40})</li>|<a title="([^"]+)"><span class="flag flag-([a-z\-]+)""",
+            RegexOption.IGNORE_CASE
+        )
+        val boundaries = heading.findAll(column).map { m ->
+            val name = (m.groupValues[1].ifEmpty { m.groupValues[2] }).trim()
+            Triple(m.range.first, name, m.groupValues[3])
+        }.filter { it.second.isNotEmpty() }.toList()
+
+        val groups = mutableListOf<CompetitionGroup>()
+        val starts = listOf(0) + boundaries.map { it.first }
+        for (i in starts.indices) {
+            val from = starts[i]
+            val to = starts.getOrNull(i + 1) ?: column.length
+            val name = if (i == 0) "" else boundaries[i - 1].second
+            val code = if (i == 0) "" else boundaries[i - 1].third
+            val comps = parseCompetitionLinks(column.substring(from, to), seenSlugs)
+            if (comps.isEmpty()) continue
+            groups += CompetitionGroup(
+                id = "$categoryName/${name.ifEmpty { "all" }}",
+                name = name,
+                countryCode = code,
+                competitions = comps
+            )
+        }
+        return groups
+    }
+
+    private fun parseCompetitionLinks(section: String, seenSlugs: MutableSet<String>): List<Competition> {
+        val comps = mutableListOf<Competition>()
+        for (part in section.split("href=\"/competitions/").drop(1)) {
+            val slug = part.takeWhile { it != '"' && it != '?' && it != '/' }
+            if (slug.isEmpty() || slug in seenSlugs) continue
+            seenSlugs += slug
+            val name = (extractFirst("""title="([^"]+)"""", part.take(200))
+                ?: extractFirst(">([^<]{2,60})<", part.take(100))
+                ?: slugToName(slug)).trim()
+            comps += Competition(id = slug, slug = slug, name = decodeEntities(name), logoPath = "")
+        }
+        return comps
+    }
+
+    /** Minimal entity decoding — competition names carry `&#39;` and `&amp;` (e.g. "Full Members' Cup"). */
+    private fun decodeEntities(text: String): String =
+        text.replace("&#39;", "'").replace("&quot;", "\"")
+            .replace("&lt;", "<").replace("&gt;", ">")
+            .replace("&nbsp;", " ").replace("&amp;", "&")
 
     private fun parsePlayerSuggestions(html: String): List<SearchSuggestion> {
         val results = mutableListOf<SearchSuggestion>()
@@ -496,33 +580,137 @@ class FootballiaRepository {
         return results
     }
 
-    private fun parseCalendarDays(html: String, year: Int, month: Int): Set<Int> {
-        val days = mutableSetOf<Int>()
-        val prefix = String.format("%04d-%02d-", year, month)
-        for (part in html.split("?date=").drop(1)) {
-            val d = part.take(10)
-            if (d.startsWith(prefix) && d.length == 10) {
-                d.substring(8).toIntOrNull()?.let { days += it }
-            }
+    /**
+     * Pulls the FullCalendar `events: [...]` array out of the calendar page's inline script.
+     *
+     * Each entry looks like
+     * `{"competition":"Serie A","start":"2026-01-03","url":"/matches/…","home_team":"<span
+     *  class='logo'><img alt=\"…\" src=\"/uploads/team/…\"/></span>Name","away_team":"…"}`
+     * — the team fields are HTML fragments, so the crest comes from their `src` and the display
+     * name from the text after the closing `</span>`.
+     */
+    private fun parseCalendarEvents(html: String, year: Int): Map<String, List<Match>> {
+        val json = extractEventsArray(html) ?: return emptyMap()
+        val array = runCatching { JSONArray(json) }.getOrNull() ?: return emptyMap()
+        val byDate = linkedMapOf<String, MutableList<Match>>()
+        val seenPerDate = mutableMapOf<String, MutableSet<String>>()
+
+        for (i in 0 until array.length()) {
+            val event = array.optJSONObject(i) ?: continue
+            val date = event.optString("start")
+            // The feed occasionally carries neighbouring years' fixtures; keep the page's own.
+            if (date.length != 10 || date.take(4).toIntOrNull() != year) continue
+
+            val url = event.optString("url")
+            val slug = url.substringAfter("/matches/", "").takeWhile { it != '?' && it != '/' }
+            if (slug.isEmpty()) continue
+            if (!seenPerDate.getOrPut(date) { mutableSetOf() }.add(slug)) continue
+
+            val (homeName, homeLogo) = parseCalendarTeam(event.optString("home_team"))
+            val (awayName, awayLogo) = parseCalendarTeam(event.optString("away_team"))
+
+            byDate.getOrPut(date) { mutableListOf() } += Match(
+                id = slug, slug = slug,
+                homeTeam = homeName, awayTeam = awayName,
+                competition = event.optString("competition").trim(),
+                stage = "",
+                date = formatCalendarDate(date),
+                thumbnailHash = "",
+                homeTeamLogoPath = homeLogo, awayTeamLogoPath = awayLogo
+            )
         }
-        return days
+        return byDate
     }
 
-    private fun extractCalendarYearMonth(html: String): Pair<Int, Int>? {
-        val months = listOf("January","February","March","April","May","June",
-            "July","August","September","October","November","December")
-        for ((i, name) in months.withIndex()) {
-            val yearStr = extractFirst("$name\\s+(\\d{4})", html) ?: continue
-            return Pair(yearStr.toInt(), i + 1)
+    /**
+     * Extracts the balanced `[...]` literal following `events:` in the page's setup script.
+     *
+     * Candidates are filtered twice because third-party scripts on the page declare similar
+     * keys: an identifier that merely *ends* in "events" (New Relic's `generic_events:`) is
+     * skipped, as is any `events:` not followed by an array literal.
+     */
+    private fun extractEventsArray(html: String): String? {
+        var search = 0
+        while (true) {
+            val marker = html.indexOf("events:", search).takeIf { it >= 0 } ?: return null
+            search = marker + 1
+
+            val before = html.getOrNull(marker - 1)
+            if (before != null && (before.isLetterOrDigit() || before == '_' || before == '.')) continue
+
+            var start = marker + "events:".length
+            while (start < html.length && html[start].isWhitespace()) start++
+            if (start >= html.length || html[start] != '[') continue
+
+            extractBalancedArray(html, start)?.let { return it }
+        }
+    }
+
+    private fun extractBalancedArray(html: String, start: Int): String? {
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (i in start until html.length) {
+            val c = html[i]
+            if (inString) {
+                when {
+                    escaped -> escaped = false
+                    c == '\\' -> escaped = true
+                    c == '"' -> inString = false
+                }
+                continue
+            }
+            when (c) {
+                '"' -> inString = true
+                '[' -> depth++
+                ']' -> { depth--; if (depth == 0) return html.substring(start, i + 1) }
+            }
         }
         return null
     }
 
+    /** Splits a calendar `home_team`/`away_team` HTML fragment into (display name, crest path). */
+    private fun parseCalendarTeam(fragment: String): Pair<String, String> {
+        if (fragment.isEmpty()) return Pair("", "")
+        val logo = extractFirst("""src="(/uploads/team/[^"]+)"""", fragment) ?: ""
+        val name = fragment.substringAfterLast("</span>", fragment)
+            .replace(Regex("<[^>]+>"), "")
+            .trim()
+            .ifEmpty { extractFirst("""alt="([^"]+)"""", fragment) ?: "" }
+        return Pair(name, logo)
+    }
+
+    /** `2026-01-03` → `January 3, 2026`, matching the date style used by the table layouts. */
+    private fun formatCalendarDate(iso: String): String {
+        val parts = iso.split("-")
+        if (parts.size != 3) return iso
+        val month = DateFormatSymbols(Locale.ENGLISH).months.getOrNull((parts[1].toIntOrNull() ?: 0) - 1)
+            ?: return iso
+        val day = parts[2].toIntOrNull() ?: return iso
+        return "$month $day, ${parts[0]}"
+    }
+
+    /**
+     * Highest page number linked from the pagination strip.
+     *
+     * Scanning is scoped to the `<ul class="pagination">` block because page numbers also appear
+     * in the page's language-switcher links, which always point at page 1. Three separators are
+     * needed: competition pages link `?page=N`, while player/team pages carry an existing query
+     * parameter and link `&amp;page=N` — HTML-escaped, so a bare `&page=` never matches.
+     */
     private fun detectLastPage(html: String): Int {
+        val start = html.indexOf("class=\"pagination")
+        val scope = if (start >= 0) {
+            val end = html.indexOf("</ul>", start).takeIf { it >= 0 } ?: html.length
+            html.substring(start, end)
+        } else html
+
         var max = 1
-        for (part in html.split("?page=").drop(1)) {
-            val n = part.takeWhile { it.isDigit() }.toIntOrNull() ?: continue
-            if (n > max) max = n
+        for (sep in listOf("?page=", "&page=", "&amp;page=")) {
+            for (part in scope.split(sep).drop(1)) {
+                val n = part.takeWhile { it.isDigit() }.toIntOrNull() ?: continue
+                if (n > max) max = n
+            }
         }
         return max
     }

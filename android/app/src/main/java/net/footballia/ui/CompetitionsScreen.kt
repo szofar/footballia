@@ -8,7 +8,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.EmojiEvents
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.*
@@ -56,7 +56,7 @@ fun CompetitionsScreen(viewModel: FootballiaViewModel, onMatchSelect: (Match) ->
                     onClick = { selectedCompetition = null },
                     modifier = Modifier.focusRequester(backFocusRequester)
                 ) {
-                    Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White.copy(alpha = 0.6f))
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White.copy(alpha = 0.6f))
                 }
                 Text(comp.name, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
                 if (viewModel.isLoadingMatches) {
@@ -103,14 +103,39 @@ fun CompetitionsScreen(viewModel: FootballiaViewModel, onMatchSelect: (Match) ->
                             fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold,
                             letterSpacing = 1.5.sp,
-                            modifier = Modifier.padding(top = 8.dp)
+                            modifier = Modifier.padding(top = 12.dp)
                         )
                     }
-                    items(category.competitions, key = { it.id }) { comp ->
-                        CompetitionCard(competition = comp, onClick = {
-                            selectedCompetition = comp
-                            viewModel.loadMatchesLastPage(MatchFilter.ByCompetition(comp.slug))
-                        })
+                    category.groups.forEach { group ->
+                        // Country/continent sub-heading; flat categories have one unnamed group.
+                        if (group.name.isNotEmpty()) {
+                            item(
+                                key = "group_${group.id}",
+                                span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.padding(top = 4.dp)
+                                ) {
+                                    group.flagEmoji?.let { flag ->
+                                        Text(flag, fontSize = 15.sp)
+                                    }
+                                    Text(
+                                        group.name,
+                                        color = Color.White.copy(alpha = 0.75f),
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+                        }
+                        items(group.competitions, key = { it.id }) { comp ->
+                            CompetitionCard(competition = comp, onClick = {
+                                selectedCompetition = comp
+                                viewModel.loadMatchesLastPage(MatchFilter.ByCompetition(comp.slug))
+                            })
+                        }
                     }
                 }
             }

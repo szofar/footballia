@@ -70,9 +70,10 @@ fun VideoGridView(
                     contentPadding = PaddingValues(bottom = 28.dp),
                     modifier = Modifier.fillMaxSize().alpha(if (isLoading) 0.35f else 1f)
                 ) {
-                    // The site lists matches oldest-first; the last row is the most recent,
-                    // so reverse for display to put the most recent match top-left.
-                    items(matches.asReversed(), key = { it.id }) { match ->
+                    // Reversed pages come from the site's oldest-first listings, so flipping
+                    // them puts the most recent match top-left. The /matches index is served
+                    // in an arbitrary order and is left exactly as the site returned it.
+                    items(if (isReversed) matches.asReversed() else matches, key = { it.id }) { match ->
                         VideoCardView(match = match, onClick = { onMatchSelect(match) })
                     }
                 }

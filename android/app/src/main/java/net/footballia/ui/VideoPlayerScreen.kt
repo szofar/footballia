@@ -18,7 +18,7 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -41,6 +41,7 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -89,6 +90,16 @@ fun VideoPlayerScreen(match: Match, onClose: () -> Unit) {
 
     // Remote's back button exits the video instead of navigating within it.
     BackHandler(onBack = onClose)
+
+    // Keep the display awake for the whole session. The TV otherwise dims and sleeps on its
+    // inactivity timer: ExoPlayer alone doesn't hold a wake lock, and nothing here counts as
+    // user input during playback. Driven off the composition's own View so it holds regardless
+    // of how the Compose context is wrapped, and released as soon as the player goes away.
+    val view = LocalView.current
+    DisposableEffect(view) {
+        view.keepScreenOn = true
+        onDispose { view.keepScreenOn = false }
+    }
 
     // Receive stream URL from JS bridge on the main coroutine. Give up after a
     // timeout instead of spinning forever if the page never yields a stream.
@@ -265,7 +276,7 @@ fun VideoPlayerScreen(match: Match, onClose: () -> Unit) {
                 horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 IconButton(onClick = onClose) {
-                    Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White.copy(alpha = 0.7f))
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White.copy(alpha = 0.7f))
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(match.title, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, maxLines = 1)

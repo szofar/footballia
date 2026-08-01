@@ -2,7 +2,6 @@ import SwiftUI
 
 struct CalendarView: View {
     @Environment(FootballiaService.self) private var service
-    @State private var selectedDay: Int? = nil
     @State private var selectedMatch: Match? = nil
 
     private var monthName: String {
@@ -32,10 +31,7 @@ struct CalendarView: View {
                 .zIndex(10)
             }
         }
-        .task {
-            if !service.didCheckMasterAccess { await service.refreshMasterAccess() }
-            if service.hasMasterAccess { await service.loadCalendar() }
-        }
+        .task { await service.startCalendar() }
     }
 
     // MARK: - Master gate
@@ -76,7 +72,7 @@ struct CalendarView: View {
                         .padding(.horizontal, 28)
                         .padding(.top, 24)
 
-                    if let day = selectedDay {
+                    if let day = service.calendarSelectedDay {
                         matchesForDay(day)
                             .padding(.horizontal, 28)
                     } else {
@@ -121,7 +117,7 @@ struct CalendarView: View {
                 }
                 .buttonStyle(.plain)
 
-                Text("\(monthName) \(service.calendarYear)")
+                Text(verbatim: "\(monthName) \(service.calendarYear)")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(.white)
                     .frame(minWidth: 140, alignment: .center)
@@ -163,17 +159,11 @@ struct CalendarView: View {
                         DayCell(
                             day: day,
                             hasMatch: service.calendarMatchDays.contains(day),
-                            isSelected: selectedDay == day
+                            isSelected: service.calendarSelectedDay == day
                         ) {
-                            if service.calendarMatchDays.contains(day) {
-                                selectedDay = (selectedDay == day) ? nil : day
-                                if selectedDay != nil {
-                                    let dateStr = String(format: "%04d-%02d-%02d",
-                                                         service.calendarYear,
-                                                         service.calendarMonth, day)
-                                    Task { await service.loadMatches(filter: .date(dateStr)) }
-                                }
-                            }
+                            guard service.calendarMatchDays.contains(day) else { return }
+                            // Days come from the cached year feed, so this is a local lookup.
+                            service.selectCalendarDay(service.calendarSelectedDay == day ? nil : day)
                         }
                     } else {
                         Color.clear.frame(height: 38)
@@ -195,16 +185,14 @@ struct CalendarView: View {
                 Spacer()
             }
 
-            if service.isLoadingMatches {
-                ProgressView().tint(.green).frame(maxWidth: .infinity)
-            } else if service.matches.isEmpty {
+            if service.calendarMatches.isEmpty {
                 Text("No matches found for this date.")
                     .foregroundColor(.white.opacity(0.35))
                     .font(.subheadline)
             } else {
                 let columns = [GridItem(.adaptive(minimum: 230, maximum: 340), spacing: 16)]
                 LazyVGrid(columns: columns, spacing: 16) {
-                    ForEach(service.matches) { match in
+                    ForEach(service.calendarMatches) { match in
                         #if os(tvOS)
                         Button { selectedMatch = match } label: {
                             VideoCardView(match: match)
@@ -228,7 +216,6 @@ struct CalendarView: View {
         var y = service.calendarYear
         if m < 1  { m = 12; y -= 1 }
         if m > 12 { m = 1;  y += 1 }
-        selectedDay = nil
         Task { await service.loadCalendar(year: y, month: m) }
     }
 

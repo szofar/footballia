@@ -7,6 +7,9 @@ struct SearchView: View {
     @State private var selectedSuggestion: SearchSuggestion? = nil
     @State private var selectedMatch: Match? = nil
     @FocusState private var fieldFocused: Bool
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #endif
 
     var body: some View {
         ZStack {
@@ -46,82 +49,108 @@ struct SearchView: View {
 
     private var searchBar: some View {
         VStack(spacing: 0) {
+            #if os(iOS)
+            if horizontalSizeClass == .compact {
+                VStack(spacing: 10) {
+                    searchFieldView
+                    searchModeToggleView
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.horizontal, 28)
+                .padding(.top, 24)
+                .padding(.bottom, 20)
+            } else {
+                HStack(spacing: 10) {
+                    searchModeToggleView
+                    searchFieldView
+                }
+                .padding(.horizontal, 28)
+                .padding(.top, 24)
+                .padding(.bottom, 20)
+            }
+            #else
             HStack(spacing: 10) {
-                // Mode toggle
-                HStack(spacing: 0) {
-                    ForEach(SearchMode.allCases) { m in
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.15)) {
-                                mode = m
-                                selectedSuggestion = nil
-                            }
-                        } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: m == .players ? "person.2.fill" : "flag.fill")
-                                    .font(.system(size: 11))
-                                Text(m.rawValue)
-                                    .font(.system(size: 12, weight: .medium))
-                            }
-                            .foregroundColor(mode == m ? .black : .white.opacity(0.5))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 7)
-                            .background(mode == m ? Color.green : Color.clear)
-                            .clipShape(RoundedRectangle(cornerRadius: 7))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(3)
-                .background(Color.white.opacity(0.07))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-
-                // Text field
-                HStack(spacing: 8) {
-                    if service.isSearching {
-                        ProgressView().tint(.green).controlSize(.small)
-                    } else {
-                        Image(systemName: "magnifyingglass")
-                            .foregroundColor(.white.opacity(fieldFocused ? 0.7 : 0.3))
-                            .font(.system(size: 14))
-                    }
-
-                    TextField(mode.placeholder, text: $query)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 14))
-                        .foregroundColor(.white)
-                        .focused($fieldFocused)
-
-                    if !query.isEmpty {
-                        Button {
-                            query = ""
-                            selectedSuggestion = nil
-                            service.clearSearch()
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundColor(.white.opacity(0.3))
-                                .font(.system(size: 13))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 9)
-                .background(Color.white.opacity(0.07))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.white.opacity(fieldFocused ? 0.2 : 0.0), lineWidth: 1)
-                )
-                .animation(.easeInOut(duration: 0.15), value: fieldFocused)
+                searchModeToggleView
+                searchFieldView
             }
             .padding(.horizontal, 28)
             .padding(.top, 24)
             .padding(.bottom, 20)
+            #endif
         }
         .background(Color(red: 0.07, green: 0.07, blue: 0.09))
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.white.opacity(0.06)).frame(height: 1)
         }
+    }
+
+    private var searchModeToggleView: some View {
+        HStack(spacing: 0) {
+            ForEach(SearchMode.allCases) { m in
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        mode = m
+                        selectedSuggestion = nil
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: m == .players ? "person.2.fill" : "flag.fill")
+                            .font(.system(size: 11))
+                        Text(m.rawValue)
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundColor(mode == m ? .black : .white.opacity(0.5))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(mode == m ? Color.green : Color.clear)
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .background(Color.white.opacity(0.07))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var searchFieldView: some View {
+        HStack(spacing: 8) {
+            if service.isSearching {
+                ProgressView().tint(.green).controlSize(.small)
+            } else {
+                Image(systemName: "magnifyingglass")
+                    .foregroundColor(.white.opacity(fieldFocused ? 0.7 : 0.3))
+                    .font(.system(size: 14))
+            }
+
+            TextField(mode.placeholder, text: $query)
+                .textFieldStyle(.plain)
+                .font(.system(size: 14))
+                .foregroundColor(.white)
+                .focused($fieldFocused)
+
+            if !query.isEmpty {
+                Button {
+                    query = ""
+                    selectedSuggestion = nil
+                    service.clearSearch()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.white.opacity(0.3))
+                        .font(.system(size: 13))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(Color.white.opacity(0.07))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.white.opacity(fieldFocused ? 0.2 : 0.0), lineWidth: 1)
+        )
+        .animation(.easeInOut(duration: 0.15), value: fieldFocused)
     }
 
     // MARK: - Suggestion phase (list of player/team names)
@@ -230,7 +259,7 @@ struct SearchView: View {
                 )
             }
         }
-        .task { await service.loadMatchesForSuggestion(suggestion) }
+        .onAppear { service.loadMatchesForSuggestion(suggestion) }
     }
 
     // MARK: - Helpers

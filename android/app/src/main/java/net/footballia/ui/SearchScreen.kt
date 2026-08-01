@@ -9,7 +9,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Person
@@ -145,7 +145,7 @@ fun SearchScreen(viewModel: FootballiaViewModel, onMatchSelect: (Match) -> Unit)
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     IconButton(onClick = { viewModel.clearActiveSuggestion() }) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White.copy(alpha = 0.6f))
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White.copy(alpha = 0.6f))
                     }
                     androidx.compose.material3.Text(activeSuggestion.name, color = Color.White, fontWeight = FontWeight.SemiBold)
                 }

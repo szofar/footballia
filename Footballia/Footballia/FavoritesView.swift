@@ -60,7 +60,7 @@ struct FavoritesView: View {
         .task {
             // Seeds the cache on first ever launch. An empty list with a cache present means the
             // user cleared it on purpose, so it is left alone rather than silently repopulated.
-            if !FavoriteTeamsStore.hasCache { await service.loadFeaturedTeams() }
+            await service.loadFavoriteTeams()
         }
     }
 
@@ -105,7 +105,7 @@ struct FavoritesView: View {
                         ForEach(service.favoriteTeams) { team in
                             TeamCardView(team: team) {
                                 selectedTeam = team
-                                Task { await service.loadMatchesLastPage(filter: .team(team.slug)) }
+                                service.loadMatchesLastPage(filter: .team(team.slug))
                             }
                         }
                     }

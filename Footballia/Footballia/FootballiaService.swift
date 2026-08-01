@@ -66,10 +66,19 @@ final class FootballiaService {
     var searchPaginationReversed = true
 
     // MARK: - Calendar
+    /// Days of `calendarMonth` that have at least one match, so the grid can highlight them.
     var calendarMatchDays: Set<Int> = []
     var calendarYear  = Calendar.current.component(.year,  from: Date())
     var calendarMonth = Calendar.current.component(.month, from: Date())
+    var calendarSelectedDay: Int?
+    /// Matches for `calendarSelectedDay`, served from `calendarCache` — never a fresh request.
+    var calendarMatches: [Match] = []
     var isLoadingCalendar = false
+
+    /// One entry per fetched year, keyed by ISO `yyyy-MM-dd`. `/calendar/<year>` returns the
+    /// whole year in one payload, so a year is fetched at most once per session.
+    private var calendarCache: [Int: [String: [Match]]] = [:]
+    private var calendarStarted = false
 
     static let baseURL = "https://footballia.eu"
 
@@ -139,7 +148,7 @@ final class FootballiaService {
             if isLoggedIn {
                 accountEmail = email
                 UserDefaults.standard.set(email, forKey: "footballia.accountEmail")
-                async let t: () = loadFeaturedTeams()
+                async let t: () = loadFavoriteTeams()
                 async let m: () = loadMatches()
                 async let a: () = refreshMasterAccess()
                 _ = await (t, m, a)
@@ -164,7 +173,7 @@ final class FootballiaService {
         guard !html.contains("<span>Sign in</span>") else { return }
 
         isLoggedIn = true
-        async let t: () = loadFeaturedTeams()
+        async let t: () = loadFavoriteTeams()
         async let m: () = loadMatches()
         async let a: () = refreshMasterAccess()
         _ = await (t, m, a)
@@ -173,7 +182,9 @@ final class FootballiaService {
     func logout() {
         isLoggedIn = false
         matches = []; featuredTeams = []; competitionCategories = []
-        searchResults = []; searchSuggestions = []; calendarMatchDays = []
+        searchResults = []; searchSuggestions = []
+        calendarMatchDays = []; calendarMatches = []; calendarSelectedDay = nil
+        calendarCache = [:]; calendarStarted = false
         favoriteTeamSearchResults = []; favoriteTeamSearchError = nil
         isSearchingFavoriteTeams = false; pendingFavoriteSlugs = []
         currentPage = 1; hasNextPage = false; currentFilter = .all; paginationReversed = false
@@ -225,8 +236,7 @@ final class FootballiaService {
         isLoadingMatches = true
         defer { isLoadingMatches = false }
 
-        guard let url = URL(string:
-            "\(Self.baseURL)\(f.urlPath)?locale=en&page=\(page)\(f.extraQuery)")
+        guard let url = URL(string: "\(Self.baseURL)\(f.urlPath)?locale=en&page=\(page)")
         else { return }
 
         guard let html = try? await fetchHTML(from: url), !html.isEmpty else { return }
@@ -235,12 +245,21 @@ final class FootballiaService {
         hasNextPage = html.contains("rel=\"next\"")
     }
 
-    /// Fetches page 1 to discover the last page number, then loads that page.
-    /// Used for competitions so the most-recent matches show first.
-    func loadMatchesLastPage(filter: MatchFilter) async {
-        currentFilter    = filter
+    /// Loads a filter's newest matches (the site paginates oldest-first, so that's its last page).
+    ///
+    /// State is reset synchronously, before the task is spawned, so the drill-down never renders
+    /// one frame of the previous screen's matches while the request is in flight.
+    func loadMatchesLastPage(filter: MatchFilter) {
+        currentFilter      = filter
         paginationReversed = true
-        isLoadingMatches = true
+        matches            = []
+        currentPage        = 1
+        hasNextPage        = false
+        isLoadingMatches   = true
+        Task { await fetchMatchesLastPage(filter: filter) }
+    }
+
+    private func fetchMatchesLastPage(filter: MatchFilter) async {
         defer { isLoadingMatches = false }
 
         guard let page1URL = URL(string: "\(Self.baseURL)\(filter.urlPath)?locale=en&page=1") else { return }
@@ -273,32 +292,59 @@ final class FootballiaService {
         return (paths.first ?? "", paths.dropFirst().first ?? "")
     }
 
+    /// Highest page number linked from the pagination strip.
+    ///
+    /// Scanning is scoped to the `<ul class="pagination">` block because page numbers also appear
+    /// in the page's language-switcher links, which always point at page 1. Three separators are
+    /// needed: competition pages link `?page=N`, while player/team pages carry an existing query
+    /// parameter and link `&amp;page=N` — HTML-escaped, so a bare `&page=` never matches.
     private func detectLastPage(from html: String) -> Int {
-        // Scan every ?page=N in pagination links and take the maximum
+        var scope = html
+        if let start = html.range(of: "class=\"pagination") {
+            let rest = html[start.lowerBound...]
+            let end = rest.range(of: "</ul>")?.lowerBound ?? rest.endIndex
+            scope = String(rest[..<end])
+        }
+
         var maxPage = 1
-        for part in html.components(separatedBy: "?page=").dropFirst() {
-            let numStr = String(part.prefix(while: { $0.isNumber }))
-            if let n = Int(numStr) { maxPage = max(maxPage, n) }
+        for sep in ["?page=", "&page=", "&amp;page="] {
+            for part in scope.components(separatedBy: sep).dropFirst() {
+                let numStr = String(part.prefix(while: { $0.isNumber }))
+                if let n = Int(numStr) { maxPage = max(maxPage, n) }
+            }
         }
         return maxPage
     }
 
     // MARK: - Featured teams
 
-    /// Loads the homepage "top teams" strip. The first time this ever succeeds the list is
-    /// written to the favourites cache; afterwards the cache is left alone so the user's
-    /// (soon to be editable) list stays stable.
+    /// Loads the favourites list from disk, seeding it on a first run only.
+    ///
+    /// The list is app-local: footballia.eu has no way to set favourites, so there is nothing to
+    /// sync with and the cache is the only source of truth. The homepage's featured-teams strip
+    /// seeds it once, after which every change comes from the Profile tab.
+    ///
+    /// Seeding keys off the *presence of the cache key*, not a non-empty list — otherwise
+    /// "Clear All" would be silently undone by the next launch.
+    func loadFavoriteTeams() async {
+        guard !FavoriteTeamsStore.hasCache else {
+            if favoriteTeams.isEmpty { favoriteTeams = FavoriteTeamsStore.load() }
+            return
+        }
+        await loadFeaturedTeams()
+        // The user may have edited the list from the Profile tab while the fetch was in flight;
+        // that write creates the cache, so the seed must not overwrite it.
+        guard !featuredTeams.isEmpty, !FavoriteTeamsStore.hasCache else { return }
+        setFavoriteTeams(featuredTeams)
+    }
+
+    /// Loads the homepage "top teams" strip — the first-run seed for favourites, and what backs
+    /// the Profile tab's "restore defaults" action.
     func loadFeaturedTeams() async {
         guard let url  = URL(string: "\(Self.baseURL)/?locale=en"),
               let html = try? await fetchHTML(from: url) else { return }
         let parsed = parseTeams(from: html)
-        guard !parsed.isEmpty else { return }
-        featuredTeams = parsed
-
-        if !FavoriteTeamsStore.hasCache {
-            favoriteTeams = parsed
-            FavoriteTeamsStore.save(parsed)
-        }
+        if !parsed.isEmpty { featuredTeams = parsed }
     }
 
     /// Replaces the cached favourites list. The Favorites page renders this same property,
@@ -340,15 +386,10 @@ final class FootballiaService {
         setFavoriteTeams([])
     }
 
-    /// Re-seeds the favourites cache from the site's current top-teams strip.
+    /// Re-seeds the list from the site's featured-teams strip, discarding the user's edits.
     func resetFavoriteTeamsToTopTeams() async {
-        if featuredTeams.isEmpty {
-            guard let url  = URL(string: "\(Self.baseURL)/?locale=en"),
-                  let html = try? await fetchHTML(from: url) else { return }
-            let parsed = parseTeams(from: html)
-            guard !parsed.isEmpty else { return }
-            featuredTeams = parsed
-        }
+        if featuredTeams.isEmpty { await loadFeaturedTeams() }
+        guard !featuredTeams.isEmpty else { return }
         pendingFavoriteSlugs = []
         setFavoriteTeams(featuredTeams)
     }
@@ -464,10 +505,20 @@ final class FootballiaService {
     }
 
     /// Loads the most-recent-page matches for a search suggestion into `searchResults`.
-    func loadMatchesForSuggestion(_ suggestion: SearchSuggestion) async {
-        isLoadingSearchMatches = true
-        searchResults = []
+    ///
+    /// As with `loadMatchesLastPage`, the reset is synchronous so the detail view can't paint a
+    /// frame of the previously-viewed player's matches before the request lands.
+    func loadMatchesForSuggestion(_ suggestion: SearchSuggestion) {
+        searchResults            = []
         searchPaginationReversed = true
+        searchCurrentPage        = 1
+        searchHasNextPage        = false
+        searchTotalPages         = 1
+        isLoadingSearchMatches   = true
+        Task { await fetchMatchesForSuggestion(suggestion) }
+    }
+
+    private func fetchMatchesForSuggestion(_ suggestion: SearchSuggestion) async {
         defer { isLoadingSearchMatches = false }
 
         guard let page1URL = URL(string: "\(Self.baseURL)\(suggestion.urlPath)?locale=en&page=1") else { return }
@@ -506,40 +557,90 @@ final class FootballiaService {
 
     // MARK: - Calendar
 
-    func loadCalendar(year: Int? = nil, month: Int? = nil) async {
-        let y = year  ?? calendarYear
-        let m = month ?? calendarMonth
-        calendarYear  = y
-        calendarMonth = m
+    /// Opens the calendar on the most recent month that actually has matches.
+    ///
+    /// The archive lags real time (uploads trail fixtures by a few weeks), so landing on today's
+    /// month would usually show an empty grid. The latest date not in the future is used instead,
+    /// falling back to the previous year if the current one hasn't been populated yet.
+    func startCalendar() async {
+        guard !calendarStarted else { return }
+        calendarStarted = true
         isLoadingCalendar = true
         defer { isLoadingCalendar = false }
 
-        let dateStr = String(format: "%04d-%02d-01", y, m)
-        guard let url = URL(string: "\(Self.baseURL)/calendar?date=\(dateStr)&locale=en"),
-              let html = try? await fetchHTML(from: url) else { return }
+        let now = Date()
+        let cal = Calendar.current
+        let thisYear = cal.component(.year, from: now)
+        let todayISO = String(format: "%04d-%02d-%02d", thisYear,
+                              cal.component(.month, from: now), cal.component(.day, from: now))
 
-        // Keep the Master flag in sync — the calendar is the gated page
+        var landing: String?
+        for year in [thisYear, thisYear - 1] {
+            let data = await fetchCalendarYear(year)
+            landing = data.keys.filter { $0 <= todayISO }.max() ?? data.keys.max()
+            if landing != nil { break }
+        }
+
+        if let landing, landing.count == 10 {
+            calendarYear  = Int(landing.prefix(4)) ?? calendarYear
+            calendarMonth = Int(landing.dropFirst(5).prefix(2)) ?? calendarMonth
+        } else if hasMasterAccess {
+            // Nothing loaded and the account isn't gated, so this was a failed fetch —
+            // let the next visit try again instead of leaving an empty grid forever.
+            calendarStarted = false
+        }
+        refreshCalendarMonth()
+    }
+
+    func loadCalendar(year: Int, month: Int) async {
+        calendarYear = year
+        calendarMonth = month
+        calendarSelectedDay = nil
+        calendarMatches = []
+        isLoadingCalendar = true
+        defer { isLoadingCalendar = false }
+        _ = await fetchCalendarYear(year)
+        refreshCalendarMonth()
+    }
+
+    /// Selecting a day is a pure lookup in the cached year — no request, no unfiltered results.
+    func selectCalendarDay(_ day: Int?) {
+        calendarSelectedDay = day
+        guard let day else { calendarMatches = []; return }
+        let key = String(format: "%04d-%02d-%02d", calendarYear, calendarMonth, day)
+        calendarMatches = calendarCache[calendarYear]?[key] ?? []
+    }
+
+    @discardableResult
+    private func fetchCalendarYear(_ year: Int) async -> [String: [Match]] {
+        if let cached = calendarCache[year] { return cached }
+        guard let url = URL(string: "\(Self.baseURL)/calendar/\(year)?locale=en"),
+              let html = try? await fetchHTML(from: url), !html.isEmpty else { return [:] }
+
+        // The calendar is the Master-gated page, so this doubles as the entitlement check.
         if Self.isMasterGated(html) {
             hasMasterAccess = false
             didCheckMasterAccess = true
-            calendarMatchDays = []
-            return
+            UserDefaults.standard.set(false, forKey: Self.masterAccessKey)
+            return [:]
         }
         hasMasterAccess = true
         didCheckMasterAccess = true
+        UserDefaults.standard.set(true, forKey: Self.masterAccessKey)
 
-        var days = parseCalendarDays(from: html, year: y, month: m)
+        let data = parseCalendarEvents(from: html, year: year)
+        // Only a successful fetch is cached, so a network blip retries instead of sticking empty.
+        if !data.isEmpty { calendarCache[year] = data }
+        return data
+    }
 
-        // Fallback: bare /calendar returns most-recent month; use it to seed year/month
-        if days.isEmpty {
-            guard let fallback = URL(string: "\(Self.baseURL)/calendar?locale=en"),
-                  let fbHTML = try? await fetchHTML(from: fallback) else { return }
-            if let (fy, fm) = extractCalendarYearMonth(from: fbHTML) {
-                calendarYear = fy; calendarMonth = fm
-                days = parseCalendarDays(from: fbHTML, year: fy, month: fm)
-            }
-        }
-        calendarMatchDays = days
+    private func refreshCalendarMonth() {
+        let prefix = String(format: "%04d-%02d-", calendarYear, calendarMonth)
+        calendarMatchDays = Set(
+            (calendarCache[calendarYear] ?? [:]).keys
+                .filter { $0.hasPrefix(prefix) }
+                .compactMap { Int($0.suffix(2)) }
+        )
     }
 
     // MARK: - HTML fetch
@@ -890,70 +991,230 @@ final class FootballiaService {
 
     // MARK: - Competition parser
 
-    // The competitions menu/page uses col-md-3 column divs, each with an h4/h5/h6 category
-    // header and competition anchor tags — e.g.:
-    //   <div class="col-md-3"><h5>England</h5>
-    //     <ul><li><a href="/competitions/premier-league" title="Premier League">…</a></li> …
-    //
-    // Splits on "col-md-3" (not exact-quoted) so it handles additional CSS classes
-    // such as class="col-md-3 dropdown-col". Window is 16 000 chars to fit large country sections.
+    /// Parses the competitions mega-menu, which nests two levels deep:
+    ///
+    /// ```
+    /// <div class="col-md-3"><h5>Domestic</h5><ul class="links">
+    ///   <li>Europe</li>
+    ///   <ul class="ul-toggle … sub-menu">
+    ///     <li data-keep-open="true"><a title="England"><span class="flag flag-england"></span>England</a>
+    ///       <ul class="links" style="display:none;"><li><a href="/competitions/fa-cup" …>FA Cup</a></li>…</ul>
+    /// ```
+    ///
+    /// The Domestic column groups by country (each with a flag sprite class); the national-team
+    /// columns group by continent with plain `<li>Europe</li>` headings; "Others" is a flat list
+    /// and becomes a single unnamed group.
+    ///
+    /// Each column is bounded at its closing `</ul></div>` rather than a fixed character budget —
+    /// Domestic alone carries ~280 competitions and was previously truncated mid-list.
     private func parseCompetitions(from html: String) -> [CompetitionCategory] {
         var categories: [CompetitionCategory] = []
         var seenSlugs = Set<String>()
 
-        for chunk in html.components(separatedBy: "col-md-3").dropFirst() {
+        for chunk in html.components(separatedBy: "<div class=\"col-md-3\">").dropFirst() {
             guard chunk.contains("href=\"/competitions/") else { continue }
-
-            let window = String(chunk.prefix(16000))
+            let end = chunk.range(of: "</ul></div>")?.lowerBound ?? chunk.endIndex
+            let column = String(chunk[..<end])
 
             let categoryName = (
-                extractFirst(pattern: #"<h[4-6][^>]*>\s*([^<]+)\s*</h[4-6]>"#, in: window) ?? "Other"
+                extractFirst(pattern: #"<h[4-6][^>]*>\s*([^<]+)\s*</h[4-6]>"#, in: column) ?? "Other"
             ).trimmed
 
-            var comps: [Competition] = []
-            for part in window.components(separatedBy: "href=\"/competitions/").dropFirst() {
-                let slug = String(part.prefix(while: { $0 != "\"" && $0 != "?" && $0 != "/" }))
-                guard !slug.isEmpty, !seenSlugs.contains(slug) else { continue }
-                seenSlugs.insert(slug)
-
-                let name = extractFirst(pattern: #"title=\"([^\"]+)\""#, in: String(part.prefix(200)))
-                    ?? extractFirst(pattern: #">([^<]{2,60})<"#, in: String(part.prefix(100)))
-                    ?? slug.components(separatedBy: "-").map { $0.capitalized }.joined(separator: " ")
-
-                comps.append(Competition(id: slug, slug: slug, name: name.trimmed, logoPath: ""))
-            }
-
-            if !comps.isEmpty {
-                categories.append(CompetitionCategory(id: categoryName, name: categoryName,
-                                                      competitions: comps))
+            let groups = parseCompetitionGroups(from: column, category: categoryName, seenSlugs: &seenSlugs)
+            if !groups.isEmpty {
+                categories.append(CompetitionCategory(id: categoryName, name: categoryName, groups: groups))
             }
         }
         return categories
     }
 
-    // MARK: - Calendar helpers
+    /// Splits one catalogue column into its sub-headings.
+    ///
+    /// Headings are matched in document order so competitions attach to the heading that precedes
+    /// them; anything before the first heading becomes an unnamed leading group, which is how a
+    /// flat column ("Others") ends up as a single group.
+    private func parseCompetitionGroups(from column: String,
+                                        category: String,
+                                        seenSlugs: inout Set<String>) -> [CompetitionGroup] {
+        // A continent heading (`<li>Europe</li>`) or a country row (`<a title="England"><span
+        // class="flag flag-england" …>`). Country rows carry the sprite class; continents don't.
+        let pattern = #"<li>([^<>]{2,40})</li>|<a title="([^"]+)"><span class="flag flag-([a-z\-]+)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { return [] }
 
-    private func parseCalendarDays(from html: String, year: Int, month: Int) -> Set<Int> {
-        var days = Set<Int>()
-        let prefix = String(format: "%04d-%02d-", year, month)
-        for part in html.components(separatedBy: "?date=").dropFirst() {
-            let d = String(part.prefix(10))
-            guard d.hasPrefix(prefix), d.count == 10, let day = Int(d.suffix(2)) else { continue }
-            days.insert(day)
+        let ns = column as NSString
+        var boundaries: [(offset: Int, name: String, code: String)] = []
+        for m in regex.matches(in: column, range: NSRange(location: 0, length: ns.length)) {
+            func group(_ i: Int) -> String {
+                m.range(at: i).location == NSNotFound ? "" : ns.substring(with: m.range(at: i))
+            }
+            let name = (group(1).isEmpty ? group(2) : group(1)).trimmed
+            guard !name.isEmpty else { continue }
+            boundaries.append((m.range.location, name, group(3)))
         }
-        return days
+
+        var groups: [CompetitionGroup] = []
+        let starts = [0] + boundaries.map(\.offset)
+        for i in starts.indices {
+            let from = starts[i]
+            let to = i + 1 < starts.count ? starts[i + 1] : ns.length
+            let name = i == 0 ? "" : boundaries[i - 1].name
+            let code = i == 0 ? "" : boundaries[i - 1].code
+            let section = ns.substring(with: NSRange(location: from, length: to - from))
+            let comps = parseCompetitionLinks(from: section, seenSlugs: &seenSlugs)
+            guard !comps.isEmpty else { continue }
+            groups.append(CompetitionGroup(id: "\(category)/\(name.isEmpty ? "all" : name)",
+                                           name: name, countryCode: code, competitions: comps))
+        }
+        return groups
     }
 
-    private func extractCalendarYearMonth(from html: String) -> (Int, Int)? {
-        let months = ["January","February","March","April","May","June",
-                      "July","August","September","October","November","December"]
-        for (i, name) in months.enumerated() {
-            if let yearStr = extractFirst(pattern: "\(name)\\s+(\\d{4})", in: html),
-               let year = Int(yearStr) {
-                return (year, i + 1)
+    private func parseCompetitionLinks(from section: String, seenSlugs: inout Set<String>) -> [Competition] {
+        var comps: [Competition] = []
+        for part in section.components(separatedBy: "href=\"/competitions/").dropFirst() {
+            let slug = String(part.prefix(while: { $0 != "\"" && $0 != "?" && $0 != "/" }))
+            guard !slug.isEmpty, !seenSlugs.contains(slug) else { continue }
+            seenSlugs.insert(slug)
+
+            let name = (extractFirst(pattern: #"title=\"([^\"]+)\""#, in: String(part.prefix(200)))
+                ?? extractFirst(pattern: #">([^<]{2,60})<"#, in: String(part.prefix(100)))
+                ?? Self.name(fromSlug: slug)).trimmed
+
+            comps.append(Competition(id: slug, slug: slug, name: Self.decodeEntities(name), logoPath: ""))
+        }
+        return comps
+    }
+
+    /// Minimal entity decoding — competition names carry `&#39;` and `&amp;`
+    /// (e.g. "Full Members&#39; Cup").
+    static func decodeEntities(_ text: String) -> String {
+        text.replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&nbsp;", with: " ")
+            .replacingOccurrences(of: "&amp;", with: "&")
+    }
+
+    // MARK: - Calendar helpers
+
+    /// Turns the FullCalendar `events: [...]` payload into matches keyed by ISO `yyyy-MM-dd`.
+    ///
+    /// There is no per-day endpoint — `/matches?date=` and `/calendar?date=` are both ignored by
+    /// the server — so `/calendar/<year>` embedding the whole year is the only source for both
+    /// the highlighted days and each day's match list.
+    private func parseCalendarEvents(from html: String, year: Int) -> [String: [Match]] {
+        guard let json = extractEventsArray(from: html),
+              let data = json.data(using: .utf8),
+              let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return [:] }
+
+        var byDate: [String: [Match]] = [:]
+        var seenPerDate: [String: Set<String>] = [:]
+
+        for event in array {
+            let date = event["start"] as? String ?? ""
+            // The feed occasionally carries neighbouring years' fixtures; keep the page's own.
+            guard date.count == 10, Int(date.prefix(4)) == year else { continue }
+
+            let url = event["url"] as? String ?? ""
+            guard let hrefRange = url.range(of: "/matches/") else { continue }
+            let slug = String(url[hrefRange.upperBound...].prefix(while: { $0 != "?" && $0 != "/" }))
+            guard !slug.isEmpty, seenPerDate[date, default: []].insert(slug).inserted else { continue }
+
+            let (homeName, homeLogo) = parseCalendarTeam(event["home_team"] as? String ?? "")
+            let (awayName, awayLogo) = parseCalendarTeam(event["away_team"] as? String ?? "")
+
+            byDate[date, default: []].append(Match(
+                id: slug, slug: slug,
+                homeTeam: homeName, awayTeam: awayName,
+                competition: (event["competition"] as? String ?? "").trimmed,
+                stage: "",
+                date: Self.formatCalendarDate(date),
+                thumbnailHash: "",
+                homeTeamLogoPath: homeLogo, awayTeamLogoPath: awayLogo
+            ))
+        }
+        return byDate
+    }
+
+    /// Extracts the balanced `[...]` literal following `events:` in the page's setup script.
+    ///
+    /// Candidates are filtered twice because third-party scripts on the page declare similar
+    /// keys: an identifier that merely *ends* in "events" (New Relic's `generic_events:`) is
+    /// skipped, as is any `events:` not followed by an array literal.
+    ///
+    /// Scanning is done over UTF-8 bytes rather than `Character`s: the page is ~2 MB, and only
+    /// ASCII delimiters matter here — a multi-byte sequence can never contain an ASCII byte, so
+    /// team names in any script survive untouched while the scan stays linear and cheap.
+    private func extractEventsArray(from html: String) -> String? {
+        let bytes = Array(html.utf8)
+        let needle = Array("events:".utf8)
+        guard bytes.count > needle.count else { return nil }
+
+        func isIdentifierByte(_ b: UInt8) -> Bool {
+            (b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x5A) ||
+            (b >= 0x61 && b <= 0x7A) || b == UInt8(ascii: "_") || b == UInt8(ascii: ".")
+        }
+
+        for i in 0...(bytes.count - needle.count) {
+            guard bytes[i] == needle[0], Array(bytes[i..<(i + needle.count)]) == needle else { continue }
+            if i > 0, isIdentifierByte(bytes[i - 1]) { continue }
+
+            var start = i + needle.count
+            while start < bytes.count, bytes[start] == 0x20 || bytes[start] == 0x09
+                    || bytes[start] == 0x0A || bytes[start] == 0x0D { start += 1 }
+            guard start < bytes.count, bytes[start] == UInt8(ascii: "[") else { continue }
+            if let array = Self.balancedArray(bytes, from: start) { return array }
+        }
+        return nil
+    }
+
+    private static func balancedArray(_ bytes: [UInt8], from start: Int) -> String? {
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for i in start..<bytes.count {
+            let b = bytes[i]
+            if inString {
+                if escaped { escaped = false }
+                else if b == UInt8(ascii: "\\") { escaped = true }
+                else if b == UInt8(ascii: "\"") { inString = false }
+                continue
+            }
+            switch b {
+            case UInt8(ascii: "\""): inString = true
+            case UInt8(ascii: "["):  depth += 1
+            case UInt8(ascii: "]"):
+                depth -= 1
+                if depth == 0 { return String(decoding: bytes[start...i], as: UTF8.self) }
+            default: break
             }
         }
         return nil
+    }
+
+    /// Splits a calendar `home_team`/`away_team` HTML fragment into (display name, crest path).
+    private func parseCalendarTeam(_ fragment: String) -> (String, String) {
+        guard !fragment.isEmpty else { return ("", "") }
+        let logo = extractFirst(pattern: #"src=\"(/uploads/team/[^\"]+)\""#, in: fragment) ?? ""
+        var name = fragment
+        if let last = fragment.range(of: "</span>", options: .backwards) {
+            name = String(fragment[last.upperBound...])
+        }
+        name = name.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression).trimmed
+        if name.isEmpty { name = extractFirst(pattern: #"alt=\"([^\"]+)\""#, in: fragment) ?? "" }
+        return (Self.decodeEntities(name), logo)
+    }
+
+    /// `2026-01-03` → `January 3, 2026`, matching the date style used by the table layouts.
+    private static func formatCalendarDate(_ iso: String) -> String {
+        let parts = iso.components(separatedBy: "-")
+        guard parts.count == 3,
+              let month = Int(parts[1]), (1...12).contains(month),
+              let day = Int(parts[2]) else { return iso }
+        let names = ["January","February","March","April","May","June",
+                     "July","August","September","October","November","December"]
+        return "\(names[month - 1]) \(day), \(parts[0])"
     }
 
     // MARK: - Auth helpers

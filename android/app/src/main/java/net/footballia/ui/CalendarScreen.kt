@@ -22,17 +22,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.*
 import net.footballia.data.Match
-import net.footballia.data.MatchFilter
 import net.footballia.viewmodel.FootballiaViewModel
 import java.text.DateFormatSymbols
 import java.util.Calendar
+import java.util.Locale
 
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 fun CalendarScreen(viewModel: FootballiaViewModel, onMatchSelect: (Match) -> Unit) {
-    var selectedDay by remember { mutableStateOf<Int?>(null) }
-
-    LaunchedEffect(Unit) { viewModel.loadCalendar() }
+    LaunchedEffect(Unit) { viewModel.startCalendar() }
+    val selectedDay = viewModel.calendarSelectedDay
 
     Column(modifier = Modifier.fillMaxSize()) {
         // Header
@@ -50,7 +49,7 @@ fun CalendarScreen(viewModel: FootballiaViewModel, onMatchSelect: (Match) -> Uni
                 if (viewModel.isLoadingCalendar) {
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), color = Color(0xFF22C55E), strokeWidth = 2.dp)
                 }
-                IconButton(onClick = { stepMonth(viewModel, -1, selectedDay) { selectedDay = null } }) {
+                IconButton(onClick = { stepMonth(viewModel, -1) }) {
                     Icon(Icons.Default.ChevronLeft, null, tint = Color.White.copy(alpha = 0.6f))
                 }
                 Text(
@@ -58,7 +57,7 @@ fun CalendarScreen(viewModel: FootballiaViewModel, onMatchSelect: (Match) -> Uni
                     color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.widthIn(min = 160.dp),
                 )
-                IconButton(onClick = { stepMonth(viewModel, 1, selectedDay) { selectedDay = null } }) {
+                IconButton(onClick = { stepMonth(viewModel, 1) }) {
                     Icon(Icons.Default.ChevronRight, null, tint = Color.White.copy(alpha = 0.6f))
                 }
             }
@@ -92,38 +91,28 @@ fun CalendarScreen(viewModel: FootballiaViewModel, onMatchSelect: (Match) -> Uni
                         day = day,
                         hasMatch = hasMatch,
                         isSelected = isSelected,
-                        onClick = {
-                            if (hasMatch) {
-                                selectedDay = if (isSelected) null else day
-                                if (selectedDay != null) {
-                                    val dateStr = String.format("%04d-%02d-%02d", viewModel.calendarYear, viewModel.calendarMonth, day)
-                                    viewModel.loadMatches(MatchFilter.ByDate(dateStr))
-                                }
-                            }
-                        }
+                        onClick = { if (hasMatch) viewModel.selectCalendarDay(if (isSelected) null else day) }
                     )
                 }
             }
 
-            // Matches for selected day
+            // Matches for selected day, served straight from the cached year feed.
             if (selectedDay != null) {
                 item(span = { GridItemSpan(7) }) {
                     Column(modifier = Modifier.fillMaxWidth().padding(top = 20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                         Text(
-                            "${monthName(viewModel.calendarMonth)} $selectedDay",
+                            "${monthName(viewModel.calendarMonth)} $selectedDay, ${viewModel.calendarYear}",
                             color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold
                         )
-                        if (viewModel.isLoadingMatches) {
-                            CircularProgressIndicator(color = Color(0xFF22C55E), modifier = Modifier.align(Alignment.CenterHorizontally))
-                        } else if (viewModel.matches.isEmpty()) {
+                        if (viewModel.calendarMatches.isEmpty()) {
                             Text("No matches found for this date.", color = Color.White.copy(alpha = 0.35f), fontSize = 14.sp)
                         }
                     }
                 }
-                if (!viewModel.isLoadingMatches) {
-                    items(viewModel.matches.asReversed(), key = { "match_${it.id}" }) { match ->
-                        VideoCardView(match = match, onClick = { onMatchSelect(match) })
-                    }
+                // Cards span two of the seven day-columns so they land near the ~280dp width
+                // the other grids use; one column would be barely wider than a day cell.
+                items(viewModel.calendarMatches, key = { "match_${it.id}" }, span = { GridItemSpan(2) }) { match ->
+                    VideoCardView(match = match, onClick = { onMatchSelect(match) })
                 }
             }
         }
@@ -174,17 +163,16 @@ private fun DayCell(day: Int, hasMatch: Boolean, isSelected: Boolean, onClick: (
     }
 }
 
-private fun stepMonth(viewModel: FootballiaViewModel, delta: Int, selectedDay: Int?, clearSelected: () -> Unit) {
+private fun stepMonth(viewModel: FootballiaViewModel, delta: Int) {
     var m = viewModel.calendarMonth + delta
     var y = viewModel.calendarYear
     if (m < 1)  { m = 12; y -= 1 }
     if (m > 12) { m = 1;  y += 1 }
-    clearSelected()
     viewModel.loadCalendar(y, m)
 }
 
 private fun monthName(month: Int): String =
-    DateFormatSymbols().months.getOrElse(month - 1) { "" }
+    DateFormatSymbols(Locale.ENGLISH).months.getOrElse(month - 1) { "" }
 
 private fun computeDays(year: Int, month: Int): List<Int?> {
     val cal = Calendar.getInstance().apply {
