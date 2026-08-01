@@ -16,29 +16,10 @@ struct CalendarView: View {
 
     var body: some View {
         ZStack {
-            VStack(spacing: 0) {
-                calendarHeader
-                ScrollView {
-                    VStack(spacing: 28) {
-                        monthGrid
-                            .padding(.horizontal, 28)
-                            .padding(.top, 24)
-
-                        if let day = selectedDay {
-                            matchesForDay(day)
-                                .padding(.horizontal, 28)
-                        } else {
-                            Text("Select a highlighted date to see its matches.")
-                                .font(.subheadline)
-                                .foregroundColor(.white.opacity(0.3))
-                                .frame(maxWidth: .infinity)
-                                .padding(.top, 12)
-                        }
-
-                        Spacer(minLength: 28)
-                    }
-                }
-                .scrollIndicators(.hidden)
+            if service.didCheckMasterAccess && !service.hasMasterAccess {
+                masterUpsell
+            } else {
+                calendarBody
             }
 
             if let match = selectedMatch {
@@ -51,7 +32,66 @@ struct CalendarView: View {
                 .zIndex(10)
             }
         }
-        .task { await service.loadCalendar() }
+        .task {
+            if !service.didCheckMasterAccess { await service.refreshMasterAccess() }
+            if service.hasMasterAccess { await service.loadCalendar() }
+        }
+    }
+
+    // MARK: - Master gate
+
+    private var masterUpsell: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "lock.fill")
+                .font(.system(size: 40))
+                .foregroundColor(.white.opacity(0.15))
+
+            Text("Calendar")
+                .font(.system(size: 22, weight: .bold))
+                .foregroundColor(.white.opacity(0.7))
+
+            Text("This is a Master feature.")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(.white.opacity(0.5))
+
+            Text("Sign up for Master access on footballia.eu to browse matches by date — along with many more features.")
+                .font(.subheadline)
+                .foregroundColor(.white.opacity(0.35))
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 420)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 28)
+    }
+
+    // MARK: - Calendar
+
+    private var calendarBody: some View {
+        VStack(spacing: 0) {
+            calendarHeader
+            ScrollView {
+                VStack(spacing: 28) {
+                    monthGrid
+                        .padding(.horizontal, 28)
+                        .padding(.top, 24)
+
+                    if let day = selectedDay {
+                        matchesForDay(day)
+                            .padding(.horizontal, 28)
+                    } else {
+                        Text("Select a highlighted date to see its matches.")
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.3))
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 12)
+                    }
+
+                    Spacer(minLength: 28)
+                }
+            }
+            .scrollIndicators(.hidden)
+        }
     }
 
     // MARK: - Header

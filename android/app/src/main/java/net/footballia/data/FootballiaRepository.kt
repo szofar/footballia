@@ -89,9 +89,35 @@ class FootballiaRepository {
      * The calendar page renders a "This is a Master feature" upsell banner in place of the
      * actual calendar for accounts without a Master subscription.
      */
-    suspend fun checkMasterAccess(): Boolean = withContext(Dispatchers.IO) {
-        val html = fetchHtml("$BASE_URL/calendar?locale=en")
-        html.isNotEmpty() && !html.contains("This is a Master feature")
+    /**
+     * Loads the calendar page once and infers Master entitlement from whether the site swapped
+     * the calendar out for its upsell notice.
+     *
+     * Returns null when the page could not be loaded at all, so callers can tell "no Master
+     * access" apart from "the check didn't run" — a network blip must not silently downgrade
+     * the account and reshuffle the tab bar.
+     */
+    suspend fun checkMasterAccess(): Boolean? = withContext(Dispatchers.IO) {
+        val html = runCatching { fetchHtml("$BASE_URL/calendar?locale=en") }.getOrNull()
+        if (html.isNullOrEmpty()) null else !isMasterGated(html)
+    }
+
+    /**
+     * Detects the Master paywall notice, e.g.
+     * `<p class="alert alert-success">This is a Master feature. Access this and many more
+     *  features! <a href="/master">Become a Master for as little as €3.99 p/m …</a></p>`
+     *
+     * Mirrors `FootballiaService.isMasterGated` in the Swift app. The fallback window is kept
+     * narrow because Devise's own flash messages ("Signed in successfully.") reuse the same
+     * `alert alert-success` class and would otherwise be read as a paywall.
+     */
+    fun isMasterGated(html: String): Boolean {
+        val lower = html.lowercase()
+        if (lower.contains("this is a master feature")) return true
+        val alertIndex = lower.indexOf("alert alert-success")
+        if (alertIndex < 0) return false
+        val window = lower.substring(alertIndex, minOf(alertIndex + 600, lower.length))
+        return window.contains("become a master")
     }
 
     // MARK: - HTML fetch

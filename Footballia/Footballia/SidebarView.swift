@@ -1,8 +1,8 @@
 import SwiftUI
 
 struct SidebarView: View {
+    let sections: [SidebarSection]
     @Binding var selected: SidebarSection
-    let onLogout: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -18,7 +18,7 @@ struct SidebarView: View {
 
             // Nav icons
             VStack(spacing: 2) {
-                ForEach(SidebarSection.allCases) { section in
+                ForEach(sections) { section in
                     SidebarIconButton(
                         section: section,
                         isSelected: selected == section,
@@ -29,18 +29,6 @@ struct SidebarView: View {
             .padding(.vertical, 12)
 
             Spacer()
-
-            // Sign out
-            Button(action: onLogout) {
-                Image(systemName: "rectangle.portrait.and.arrow.right")
-                    .font(.system(size: 18))
-                    .foregroundColor(.white.opacity(0.28))
-                    .frame(width: 72, height: 48)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Sign Out")
-            .padding(.bottom, 10)
         }
     }
 }

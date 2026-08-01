@@ -36,12 +36,12 @@ fun VideoGridView(
     onNextPage: () -> Unit,
     onPreviousPage: () -> Unit
 ) {
+    // Pages are shown newest-first: left = more recent, right = older. In reversed mode
+    // the site's *last* page holds the newest matches, so "left" walks to a higher page
+    // number. Mirrors `VideoGridView.swift`.
     val hasPreviousPage = currentPage > 1
-    // The left/right arrows always mean "lower page number" / "higher page number" —
-    // which callback performs that depends on isReversed, but whether it's currently
-    // possible does not (hasPreviousPage/hasNextPage already reflect the loaded page).
-    val canGoBack = hasPreviousPage
-    val canGoForward = hasNextPage
+    val canGoBack = if (isReversed) hasNextPage else hasPreviousPage
+    val canGoForward = if (isReversed) hasPreviousPage else hasNextPage
     val onBack = if (isReversed) onNextPage else onPreviousPage
     val onForward = if (isReversed) onPreviousPage else onNextPage
 

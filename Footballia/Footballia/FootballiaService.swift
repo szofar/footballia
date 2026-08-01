@@ -19,8 +19,26 @@ final class FootballiaService {
     var currentFilter: MatchFilter = .all
     var paginationReversed = false
 
-    // MARK: - Featured teams (home page strip)
+    // MARK: - Master access
+    /// `true` when the account can use Master-only features (the Calendar).
+    /// Determined by loading the calendar page once at login / session restore, and cached so
+    /// the tab order is stable at launch instead of waiting on (and flip-flopping with) the
+    /// network check.
+    var hasMasterAccess = UserDefaults.standard.bool(forKey: FootballiaService.masterAccessKey)
+    var didCheckMasterAccess = false
+
+    static let masterAccessKey = "footballia.hasMasterAccess"
+
+    // MARK: - Favourite teams
+    /// The cached "top teams" list, seeded from the site's featured-teams strip on
+    /// first launch and persisted from then on so it stays stable across sessions.
+    var favoriteTeams: [Team] = FavoriteTeamsStore.load()
+
+    /// The live featured-teams strip from the homepage (used only to seed the cache).
     var featuredTeams: [Team] = []
+
+    // MARK: - Account
+    var accountEmail: String? = UserDefaults.standard.string(forKey: "footballia.accountEmail")
 
     // MARK: - Competitions catalogue
     var competitionCategories: [CompetitionCategory] = []
@@ -109,9 +127,12 @@ final class FootballiaService {
             isLoggedIn = !finalPath.hasPrefix("/users/sign_in")
 
             if isLoggedIn {
+                accountEmail = email
+                UserDefaults.standard.set(email, forKey: "footballia.accountEmail")
                 async let t: () = loadFeaturedTeams()
                 async let m: () = loadMatches()
-                _ = await (t, m)
+                async let a: () = refreshMasterAccess()
+                _ = await (t, m, a)
             } else {
                 loginError = "Invalid email or password. Please try again."
             }
@@ -135,7 +156,8 @@ final class FootballiaService {
         isLoggedIn = true
         async let t: () = loadFeaturedTeams()
         async let m: () = loadMatches()
-        _ = await (t, m)
+        async let a: () = refreshMasterAccess()
+        _ = await (t, m, a)
     }
 
     func logout() {
@@ -143,8 +165,42 @@ final class FootballiaService {
         matches = []; featuredTeams = []; competitionCategories = []
         searchResults = []; searchSuggestions = []; calendarMatchDays = []
         currentPage = 1; hasNextPage = false; currentFilter = .all; paginationReversed = false
+        hasMasterAccess = false; didCheckMasterAccess = false
+        accountEmail = nil
+        UserDefaults.standard.removeObject(forKey: "footballia.accountEmail")
+        UserDefaults.standard.removeObject(forKey: Self.masterAccessKey)
         let s = HTTPCookieStorage.shared
         (s.cookies ?? []).forEach { s.deleteCookie($0) }
+    }
+
+    // MARK: - Master access
+
+    /// Loads the calendar page once and infers Master entitlement from whether the
+    /// site swapped the calendar out for its "This is a Master feature" upsell notice.
+    /// Loads the calendar page once and infers Master entitlement from whether the
+    /// site swapped the calendar out for its "This is a Master feature" upsell notice.
+    ///
+    /// A failed fetch deliberately leaves the cached value alone rather than asserting
+    /// "no access": downgrading on a network blip would reorder the tabs and lock the
+    /// Calendar for a user who actually is a Master.
+    func refreshMasterAccess() async {
+        guard let url = URL(string: "\(Self.baseURL)/calendar?locale=en"),
+              let html = try? await fetchHTML(from: url), !html.isEmpty else { return }
+        hasMasterAccess = !Self.isMasterGated(html)
+        didCheckMasterAccess = true
+        UserDefaults.standard.set(hasMasterAccess, forKey: Self.masterAccessKey)
+    }
+
+    /// Detects the Master paywall notice, e.g.
+    /// `<p class="alert alert-success">This is a Master feature. Access this and many more
+    ///  features! <a href="/master">Become a Master for as little as €3.99 p/m …</a></p>`
+    static func isMasterGated(_ html: String) -> Bool {
+        let lower = html.lowercased()
+        if lower.contains("this is a master feature") { return true }
+        // Fallback in case the copy changes: a success alert that links to the upsell page
+        guard let alertRange = lower.range(of: "alert alert-success") else { return false }
+        let window = lower[alertRange.lowerBound...].prefix(600)
+        return window.contains("become a master")
     }
 
     // MARK: - Match loading
@@ -217,11 +273,38 @@ final class FootballiaService {
 
     // MARK: - Featured teams
 
+    /// Loads the homepage "top teams" strip. The first time this ever succeeds the list is
+    /// written to the favourites cache; afterwards the cache is left alone so the user's
+    /// (soon to be editable) list stays stable.
     func loadFeaturedTeams() async {
         guard let url  = URL(string: "\(Self.baseURL)/?locale=en"),
               let html = try? await fetchHTML(from: url) else { return }
         let parsed = parseTeams(from: html)
-        if !parsed.isEmpty { featuredTeams = parsed }
+        guard !parsed.isEmpty else { return }
+        featuredTeams = parsed
+
+        if !FavoriteTeamsStore.hasCache {
+            favoriteTeams = parsed
+            FavoriteTeamsStore.save(parsed)
+        }
+    }
+
+    /// Replaces the cached favourites list (entry point for the future editing UI).
+    func setFavoriteTeams(_ teams: [Team]) {
+        favoriteTeams = teams
+        FavoriteTeamsStore.save(teams)
+    }
+
+    /// Re-seeds the favourites cache from the site's current top-teams strip.
+    func resetFavoriteTeamsToTopTeams() async {
+        if featuredTeams.isEmpty {
+            guard let url  = URL(string: "\(Self.baseURL)/?locale=en"),
+                  let html = try? await fetchHTML(from: url) else { return }
+            let parsed = parseTeams(from: html)
+            guard !parsed.isEmpty else { return }
+            featuredTeams = parsed
+        }
+        setFavoriteTeams(featuredTeams)
     }
 
     // MARK: - Competitions
@@ -335,6 +418,16 @@ final class FootballiaService {
         let dateStr = String(format: "%04d-%02d-01", y, m)
         guard let url = URL(string: "\(Self.baseURL)/calendar?date=\(dateStr)&locale=en"),
               let html = try? await fetchHTML(from: url) else { return }
+
+        // Keep the Master flag in sync — the calendar is the gated page
+        if Self.isMasterGated(html) {
+            hasMasterAccess = false
+            didCheckMasterAccess = true
+            calendarMatchDays = []
+            return
+        }
+        hasMasterAccess = true
+        didCheckMasterAccess = true
 
         var days = parseCalendarDays(from: html, year: y, month: m)
 
@@ -622,10 +715,22 @@ final class FootballiaService {
 
     // MARK: - Team parser
 
+    // The homepage renders its top-teams strip inside a single
+    // `<div class="featured_teams …">` containing one `<span class="logo"><a href="/teams/…">`
+    // per team. Scope to that container when present so unrelated team links elsewhere on the
+    // page can't leak in, falling back to a whole-document scan if the markup changes.
     private func parseTeams(from html: String) -> [Team] {
+        let scope: String
+        if let start = html.range(of: "featured_teams"),
+           let end   = html.range(of: "</div>", range: start.upperBound..<html.endIndex) {
+            scope = String(html[start.lowerBound..<end.upperBound])
+        } else {
+            scope = html
+        }
+
         var results: [Team] = []
         var seen = Set<String>()
-        for part in html.components(separatedBy: "href=\"/teams/").dropFirst() {
+        for part in scope.components(separatedBy: "href=\"/teams/").dropFirst() {
             let slug = String(part.prefix(while: { $0 != "\"" && $0 != "?" && $0 != "/" }))
             guard !slug.isEmpty, !seen.contains(slug) else { continue }
             seen.insert(slug)

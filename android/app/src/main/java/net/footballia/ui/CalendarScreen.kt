@@ -7,6 +7,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronLeft
@@ -78,9 +79,10 @@ fun CalendarScreen(viewModel: FootballiaViewModel, onMatchSelect: (Match) -> Uni
                 }
             }
 
-            // Month days
+            // Month days. Blank leading/trailing cells are keyed by index — keying them by
+            // value would give every null cell the same key and crash the lazy grid.
             val days = computeDays(viewModel.calendarYear, viewModel.calendarMonth)
-            items(days, key = { it ?: "null_${days.indexOf(it)}" }) { day ->
+            itemsIndexed(days, key = { index, day -> if (day == null) "blank_$index" else "day_$day" }) { _, day ->
                 if (day == null) {
                     Box(modifier = Modifier.fillMaxWidth().height(38.dp))
                 } else {

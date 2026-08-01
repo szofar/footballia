@@ -496,26 +496,55 @@ private val JS_AUTO_PLAY = """
     var reported = false;
     var fallbackTimer = null;
 
+    function report(url) {
+        if (reported || !url) return true;
+        reported = true;
+        if (fallbackTimer) clearTimeout(fallbackTimer);
+        window.Android.streamFound(url);
+        return true;
+    }
+
+    // Decode the stream straight out of the page's own "var playlist = [...]"
+    // block. The site stores each file as base64 and decodes it via
+    // new Video(file).url(). This path does not need JWPlayer to be alive.
+    function extractFromPlaylist() {
+        if (reported) return false;
+        try {
+            var m = document.documentElement.innerHTML.match(/var playlist = (\[[\s\S]*?\]);/);
+            if (!m) return false;
+            var items = JSON.parse(m[1]);
+            if (!items || !items.length || !items[0].file) return false;
+            var url = window.atob(String(items[0].file).replace(/\s/g, ''));
+            if (!url || url.indexOf('http') !== 0) return false;
+            return report(url);
+        } catch(e) { return false; }
+    }
+
     function extractURL(p) {
         if (reported) return;
         try {
             var item = p.getPlaylistItem();
-            if (item && item.file) {
-                reported = true;
-                if (fallbackTimer) clearTimeout(fallbackTimer);
-                window.Android.streamFound(item.file);
-            }
+            if (item && item.file) { report(item.file); return; }
+        } catch(e) {}
+        extractFromPlaylist();
+    }
+
+    function resizePlayer(p) {
+        try {
+            var col = document.querySelector('#match .col-md-7');
+            if (col) col.className = col.className.replace('col-md-7', 'col-md-12');
+            p.resize(document.documentElement.clientWidth, window.innerHeight);
         } catch(e) {}
     }
 
     function tryStart() {
+        if (extractFromPlaylist()) return true;
         if (typeof jwplayer === 'undefined') return false;
         var p = jwplayer('jwplayer');
         if (!p || typeof p.getState !== 'function') return false;
-        var col = document.querySelector('#match .col-md-7');
-        if (col) col.className = col.className.replace('col-md-7', 'col-md-12');
-        p.resize(document.documentElement.clientWidth, window.innerHeight);
+        // Extract first: a failure inside resize() must never block playback.
         extractURL(p);
+        resizePlayer(p);
         return true;
     }
 
@@ -528,16 +557,18 @@ private val JS_AUTO_PLAY = """
     try {
         jwplayer('jwplayer').on('ready', function() {
             var p = jwplayer('jwplayer');
-            p.resize(document.documentElement.clientWidth, window.innerHeight);
             extractURL(p);
+            resizePlayer(p);
         });
     } catch(e) {}
 
     var tries = 0;
+    if (!extractFromPlaylist()) {
     var poll = setInterval(function() {
         tries++;
         if (tries > 40) { clearInterval(poll); return; }
         if (tryStart() && reported) clearInterval(poll);
     }, 250);
+    }
 })();
 """.trimIndent()

@@ -2,8 +2,13 @@ import SwiftUI
 
 struct MainView: View {
     @Environment(FootballiaService.self) private var service
-    @State private var selectedSection: SidebarSection = .home
+    @State private var selectedSection: SidebarSection = .favorites
     @State private var selectedMatch: Match? = nil
+    @State private var didApplyInitialSection = false
+
+    private var sections: [SidebarSection] {
+        SidebarSection.ordered(hasMasterAccess: service.hasMasterAccess)
+    }
 
     var body: some View {
         ZStack {
@@ -28,29 +33,29 @@ struct MainView: View {
         #if os(macOS)
         .frame(minWidth: 1000, idealWidth: 1280, minHeight: 660, idealHeight: 800)
         #endif
+        // Land on the first tab for this entitlement, but only once, so the user is
+        // never yanked off a tab they navigated to themselves.
+        .onChange(of: service.didCheckMasterAccess, initial: true) { _, checked in
+            guard checked, !didApplyInitialSection else { return }
+            didApplyInitialSection = true
+            selectedSection = sections.first ?? .favorites
+        }
     }
 
     #if os(tvOS)
     private var tvShell: some View {
         TabView(selection: $selectedSection) {
-            homeContent
-                .tabItem { Label("Home", systemImage: "house.fill") }
-                .tag(SidebarSection.home)
-            CompetitionsView()
-                .tabItem { Label("Competitions", systemImage: "trophy.fill") }
-                .tag(SidebarSection.competitions)
-            SearchView()
-                .tabItem { Label("Search", systemImage: "magnifyingglass") }
-                .tag(SidebarSection.search)
-            CalendarView()
-                .tabItem { Label("Calendar", systemImage: "calendar") }
-                .tag(SidebarSection.calendar)
+            ForEach(sections) { section in
+                content(for: section)
+                    .tabItem { Label(section.rawValue, systemImage: section.systemImage) }
+                    .tag(section)
+            }
         }
     }
     #else
     private var appShell: some View {
         HStack(spacing: 0) {
-            SidebarView(selected: $selectedSection, onLogout: service.logout)
+            SidebarView(sections: sections, selected: $selectedSection)
                 .frame(width: 72)
                 .background(Color(red: 0.06, green: 0.06, blue: 0.08))
 
@@ -58,85 +63,20 @@ struct MainView: View {
                 .fill(Color.white.opacity(0.06))
                 .frame(width: 1)
 
-            sectionContent
+            content(for: selectedSection)
                 .background(Color(red: 0.08, green: 0.08, blue: 0.10))
         }
     }
     #endif
 
     @ViewBuilder
-    private var sectionContent: some View {
-        switch selectedSection {
-        case .home:          homeContent
-        case .competitions:  CompetitionsView()
-        case .search:        SearchView()
-        case .calendar:      CalendarView()
-        case .profile:       profilePlaceholder
+    private func content(for section: SidebarSection) -> some View {
+        switch section {
+        case .favorites:    FavoritesView()
+        case .competitions: CompetitionsView()
+        case .search:       SearchView()
+        case .calendar:     CalendarView()
+        case .profile:      ProfileView()
         }
-    }
-
-    // MARK: - Home
-
-    private var homeContent: some View {
-        VStack(spacing: 0) {
-            if !service.featuredTeams.isEmpty {
-                TeamSelectorView(
-                    teams: service.featuredTeams,
-                    selectedSlug: teamSlugFromFilter
-                ) { slug in
-                    if let slug {
-                        Task { await service.loadMatchesLastPage(filter: .team(slug)) }
-                    } else {
-                        Task { await service.loadMatches(filter: .all) }
-                    }
-                }
-            }
-
-            VideoGridView(
-                title: homeSectionTitle,
-                matches: service.matches,
-                isLoading: service.isLoadingMatches,
-                currentPage: service.currentPage,
-                hasNextPage: service.hasNextPage,
-                isReversed: service.paginationReversed,
-                onSelect: { match in
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
-                        selectedMatch = match
-                    }
-                },
-                onNextPage: {
-                    Task { await service.loadMatches(page: service.currentPage + 1) }
-                },
-                onPreviousPage: {
-                    Task { await service.loadMatches(page: service.currentPage - 1) }
-                }
-            )
-        }
-    }
-
-    private var homeSectionTitle: String {
-        if case .team(let slug) = service.currentFilter {
-            return service.featuredTeams.first(where: { $0.slug == slug })?.name ?? "Matches"
-        }
-        return "Latest Matches"
-    }
-
-    private var teamSlugFromFilter: String? {
-        if case .team(let slug) = service.currentFilter { return slug }
-        return nil
-    }
-
-    // MARK: - Profile placeholder
-
-    private var profilePlaceholder: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "person.circle")
-                .font(.system(size: 48))
-                .foregroundColor(.white.opacity(0.12))
-            Text("Profile")
-                .font(.title2.weight(.semibold))
-                .foregroundColor(.white.opacity(0.4))
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

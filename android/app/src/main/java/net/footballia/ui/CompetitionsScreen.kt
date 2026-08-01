@@ -14,6 +14,8 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -35,6 +37,11 @@ fun CompetitionsScreen(viewModel: FootballiaViewModel, onMatchSelect: (Match) ->
 
     if (selectedCompetition != null) {
         val comp = selectedCompetition!!
+        // Pull focus into the drill-down as soon as it opens; otherwise focus is left orphaned
+        // by the content swap and bounces back up to the tab row.
+        val backFocusRequester = remember { FocusRequester() }
+        LaunchedEffect(comp.slug) { runCatching { backFocusRequester.requestFocus() } }
+
         Column(modifier = Modifier.fillMaxSize()) {
             // Back bar
             Row(
@@ -45,7 +52,10 @@ fun CompetitionsScreen(viewModel: FootballiaViewModel, onMatchSelect: (Match) ->
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                IconButton(onClick = { selectedCompetition = null }) {
+                IconButton(
+                    onClick = { selectedCompetition = null },
+                    modifier = Modifier.focusRequester(backFocusRequester)
+                ) {
                     Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White.copy(alpha = 0.6f))
                 }
                 Text(comp.name, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
@@ -64,12 +74,10 @@ fun CompetitionsScreen(viewModel: FootballiaViewModel, onMatchSelect: (Match) ->
                 isReversed = viewModel.paginationReversed,
                 onMatchSelect = onMatchSelect,
                 onNextPage = {
-                    val next = if (viewModel.paginationReversed) viewModel.currentPage - 1 else viewModel.currentPage + 1
-                    viewModel.loadMatches(MatchFilter.ByCompetition(comp.slug), next)
+                    viewModel.loadMatches(MatchFilter.ByCompetition(comp.slug), viewModel.currentPage + 1)
                 },
                 onPreviousPage = {
-                    val prev = if (viewModel.paginationReversed) viewModel.currentPage + 1 else viewModel.currentPage - 1
-                    viewModel.loadMatches(MatchFilter.ByCompetition(comp.slug), prev)
+                    viewModel.loadMatches(MatchFilter.ByCompetition(comp.slug), viewModel.currentPage - 1)
                 }
             )
         }

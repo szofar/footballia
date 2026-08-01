@@ -163,14 +163,8 @@ fun SearchScreen(viewModel: FootballiaViewModel, onMatchSelect: (Match) -> Unit)
                         hasNextPage = viewModel.searchHasNextPage,
                         isReversed = viewModel.searchPaginationReversed,
                         onMatchSelect = onMatchSelect,
-                        onNextPage = {
-                            val next = if (viewModel.searchPaginationReversed) viewModel.searchCurrentPage - 1 else viewModel.searchCurrentPage + 1
-                            viewModel.loadSearchPage(next)
-                        },
-                        onPreviousPage = {
-                            val prev = if (viewModel.searchPaginationReversed) viewModel.searchCurrentPage + 1 else viewModel.searchCurrentPage - 1
-                            viewModel.loadSearchPage(prev)
-                        }
+                        onNextPage = { viewModel.loadSearchPage(viewModel.searchCurrentPage + 1) },
+                        onPreviousPage = { viewModel.loadSearchPage(viewModel.searchCurrentPage - 1) }
                     )
                 }
             }

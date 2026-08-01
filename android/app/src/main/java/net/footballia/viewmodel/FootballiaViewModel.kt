@@ -13,7 +13,7 @@ import java.util.Calendar
 class FootballiaViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repo = FootballiaRepository()
-    private val favoritesStore = FavoritesStore(application)
+    private val localStore = LocalStore(application)
 
     // Auth
     var isLoggedIn by mutableStateOf(false); private set
@@ -24,23 +24,49 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
     // Whether the account has a Footballia Master subscription; null while still checking.
     var hasMasterAccess by mutableStateOf<Boolean?>(null); private set
 
+    // Email the session was established with, restored from disk for the Profile tab.
+    var accountEmail by mutableStateOf<String?>(null); private set
+
     /**
      * Startup entry point. Tries to restore a persisted session from stored cookies first; only if
      * that fails does it fall back to the debug-only dev credentials. Call once from the Activity.
      */
     fun start(devCredentials: Pair<String, String>? = null) {
         viewModelScope.launch {
+            // Seed from the last known value so the tab order is stable at launch instead of
+            // waiting on (and flip-flopping with) the network check below.
+            hasMasterAccess = runCatching { localStore.loadMasterAccess() }.getOrNull()
+
             val restored = runCatching { repo.restoreSession() }.getOrDefault(false)
             if (restored) {
                 isLoggedIn = true
+                launch { accountEmail = runCatching { localStore.loadAccountEmail() }.getOrNull() }
                 launch { loadFavoriteTeams() }
-                launch { runCatching { hasMasterAccess = repo.checkMasterAccess() } }
+                launch { refreshMasterAccess() }
                 loadMatches()
             }
             isCheckingSession = false
             if (!isLoggedIn && devCredentials != null) {
                 login(devCredentials.first, devCredentials.second)
             }
+        }
+    }
+
+    /**
+     * Resolves Master entitlement from the calendar page and caches it.
+     *
+     * A failed check leaves the previously cached value alone rather than asserting "no access":
+     * downgrading on a network blip would reorder the tab bar and lock the Calendar for a user
+     * who actually is a Master. Only when there is no cached value at all does it fall back to
+     * `false`, so the UI still resolves instead of spinning on null forever.
+     */
+    private suspend fun refreshMasterAccess() {
+        val result = runCatching { repo.checkMasterAccess() }.getOrNull()
+        if (result != null) {
+            hasMasterAccess = result
+            runCatching { localStore.saveMasterAccess(result) }
+        } else if (hasMasterAccess == null) {
+            hasMasterAccess = false
         }
     }
 
@@ -84,8 +110,10 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
                 .onSuccess { success ->
                     if (success) {
                         isLoggedIn = true
+                        accountEmail = email
+                        launch { runCatching { localStore.saveAccountEmail(email) } }
                         launch { loadFavoriteTeams() }
-                        launch { runCatching { hasMasterAccess = repo.checkMasterAccess() } }
+                        launch { refreshMasterAccess() }
                         loadMatches()
                     } else {
                         loginError = "Invalid email or password."
@@ -103,19 +131,30 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
         currentPage = 1; hasNextPage = false; paginationReversed = false
         currentFilter = MatchFilter.All; activeSuggestion = null
         hasMasterAccess = null
+        accountEmail = null
+        viewModelScope.launch {
+            runCatching { localStore.clearAccountEmail() }
+            runCatching { localStore.clearMasterAccess() }
+        }
         repo.clearCookies()
     }
 
     /** Loads the cached favorite-teams list, seeding the cache from the site on first launch. */
     private suspend fun loadFavoriteTeams() {
-        val cached = runCatching { favoritesStore.loadTeams() }.getOrNull()
+        val cached = runCatching { localStore.loadTeams() }.getOrNull()
         if (cached != null) {
             favoriteTeams = cached
             return
         }
         val fetched = runCatching { repo.loadFeaturedTeams() }.getOrDefault(emptyList())
         favoriteTeams = fetched
-        if (fetched.isNotEmpty()) runCatching { favoritesStore.saveTeams(fetched) }
+        if (fetched.isNotEmpty()) runCatching { localStore.saveTeams(fetched) }
+    }
+
+    /** Replaces the cached favorites list (entry point for the future editing UI). */
+    fun updateFavoriteTeams(teams: List<Team>) {
+        favoriteTeams = teams
+        viewModelScope.launch { runCatching { localStore.saveTeams(teams) } }
     }
 
     fun loadMatches(filter: MatchFilter? = null, page: Int = 1) {

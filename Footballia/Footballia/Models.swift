@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Sidebar navigation
 
 enum SidebarSection: String, CaseIterable, Identifiable {
-    case home         = "Home"
+    case favorites    = "Favorites"
     case competitions = "Competitions"
     case search       = "Search"
     case calendar     = "Calendar"
@@ -13,12 +13,20 @@ enum SidebarSection: String, CaseIterable, Identifiable {
 
     var systemImage: String {
         switch self {
-        case .home:         return "house.fill"
+        case .favorites:    return "star.fill"
         case .competitions: return "trophy.fill"
         case .search:       return "magnifyingglass"
         case .calendar:     return "calendar"
         case .profile:      return "person.fill"
         }
+    }
+
+    /// Tab order depends on Master entitlement: Master users land on the Calendar,
+    /// everyone else lands on Favorites with the (gated) Calendar demoted.
+    static func ordered(hasMasterAccess: Bool) -> [SidebarSection] {
+        hasMasterAccess
+            ? [.calendar, .favorites, .competitions, .search, .profile]
+            : [.favorites, .competitions, .calendar, .search, .profile]
     }
 }
 
@@ -113,7 +121,7 @@ struct CompetitionCategory: Identifiable {
 
 // MARK: - Team
 
-struct Team: Identifiable, Hashable {
+struct Team: Identifiable, Hashable, Codable {
     let id: String
     let slug: String
     let name: String
