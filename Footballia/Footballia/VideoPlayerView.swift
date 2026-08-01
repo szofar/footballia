@@ -14,60 +14,145 @@ struct VideoPlayerOverlay: View {
     @State private var isLoading = true
     #if os(macOS)
     @State private var avPlayerView: AVPlayerView? = nil
-    // Holds the controller alive for the duration of fullscreen playback.
     @State private var fsController: VideoFullScreenController? = nil
+    #elseif os(iOS)
+    @State private var isFullScreen = false
     #endif
 
     var body: some View {
+        #if os(tvOS)
+        tvBody
+        #else
+        regularBody
+        #endif
+    }
+
+    // MARK: tvOS body — no top bar so AVPlayerViewController receives full focus
+    #if os(tvOS)
+    private var tvBody: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            ZStack {
+                if nativeStreamURL == nil, let pageURL = match.matchPageURL {
+                    WebVideoPlayer(
+                        url: pageURL,
+                        onPageLoaded: {
+                            Task {
+                                try? await Task.sleep(for: .seconds(5))
+                                if nativeStreamURL == nil { isLoading = false }
+                            }
+                        },
+                        onStreamURL: { url in
+                            guard nativeStreamURL == nil else { return }
+                            nativeStreamURL = url
+                            isLoading = false
+                        }
+                    )
+                }
+
+                if let streamURL = nativeStreamURL {
+                    NativeVideoPlayer(url: streamURL, onClose: onClose)
+                        .ignoresSafeArea()
+                        .transition(.opacity)
+                }
+
+                if isLoading {
+                    loadingView.transition(.opacity)
+                }
+            }
+            .animation(.easeInOut(duration: 0.4), value: isLoading)
+            .animation(.easeInOut(duration: 0.4), value: nativeStreamURL != nil)
+        }
+    }
+    #endif
+
+    // MARK: macOS + iOS body
+    #if !os(tvOS)
+    private var regularBody: some View {
         ZStack {
             Color.black.ignoresSafeArea()
 
+            #if os(iOS)
+            if isFullScreen {
+                ZStack(alignment: .topLeading) {
+                    sharedVideoContent
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .ignoresSafeArea()
+
+                    Button(action: { isFullScreen = false }) {
+                        Image(systemName: "arrow.down.right.and.arrow.up.left")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(.white.opacity(0.85))
+                            .padding(10)
+                            .background(Color.black.opacity(0.55))
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 54)
+                    .padding(.leading, 16)
+                }
+            } else {
+                VStack(spacing: 0) {
+                    topBar
+                    sharedVideoContent
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            #else
             VStack(spacing: 0) {
                 topBar
-
-                ZStack {
-                    // Only keep the web view in the hierarchy while we still need it.
-                    // Removing it once the native URL is found eliminates cursor bleed-through
-                    // from the underlying web content and prevents any accidental ad interaction.
-                    if nativeStreamURL == nil, let pageURL = match.matchPageURL {
-                        WebVideoPlayer(
-                            url: pageURL,
-                            onPageLoaded: {
-                                Task {
-                                    try? await Task.sleep(for: .seconds(5))
-                                    if nativeStreamURL == nil { isLoading = false }
-                                }
-                            },
-                            onStreamURL: { url in
-                                guard nativeStreamURL == nil else { return }
-                                nativeStreamURL = url
-                                isLoading = false
-                            }
-                        )
-                    }
-
-                    if let streamURL = nativeStreamURL {
-                        #if os(macOS)
-                        NativeVideoPlayer(url: streamURL) { view in
-                            avPlayerView = view
-                        }
-                        .transition(.opacity)
-                        #else
-                        NativeVideoPlayer(url: streamURL)
-                            .transition(.opacity)
-                        #endif
-                    }
-
-                    if isLoading {
-                        loadingView.transition(.opacity)
-                    }
-                }
-                .animation(.easeInOut(duration: 0.4), value: isLoading)
-                .animation(.easeInOut(duration: 0.4), value: nativeStreamURL != nil)
+                sharedVideoContent
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            #endif
         }
+        #if os(iOS)
+        .ignoresSafeArea(edges: isFullScreen ? .all : [])
+        .statusBarHidden(isFullScreen)
+        #endif
     }
 
+    private var sharedVideoContent: some View {
+        ZStack {
+            if nativeStreamURL == nil, let pageURL = match.matchPageURL {
+                WebVideoPlayer(
+                    url: pageURL,
+                    onPageLoaded: {
+                        Task {
+                            try? await Task.sleep(for: .seconds(5))
+                            if nativeStreamURL == nil { isLoading = false }
+                        }
+                    },
+                    onStreamURL: { url in
+                        guard nativeStreamURL == nil else { return }
+                        nativeStreamURL = url
+                        isLoading = false
+                    }
+                )
+            }
+
+            if let streamURL = nativeStreamURL {
+                #if os(macOS)
+                NativeVideoPlayer(url: streamURL) { view in
+                    avPlayerView = view
+                }
+                .transition(.opacity)
+                #else
+                NativeVideoPlayer(url: streamURL)
+                    .transition(.opacity)
+                #endif
+            }
+
+            if isLoading {
+                loadingView.transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.4), value: isLoading)
+        .animation(.easeInOut(duration: 0.4), value: nativeStreamURL != nil)
+    }
+    #endif
+
+    // MARK: Top bar (macOS + iOS only)
     private var topBar: some View {
         HStack(spacing: 16) {
             Button(action: onClose) {
@@ -95,7 +180,7 @@ struct VideoPlayerOverlay: View {
 
             Spacer()
 
-            // Invisible mirror keeps title centred; fullscreen button overlaid on macOS
+            // Invisible mirror keeps title centred; fullscreen button overlaid
             HStack(spacing: 5) {
                 Image(systemName: "chevron.left")
                 Text("Library")
@@ -114,6 +199,13 @@ struct VideoPlayerOverlay: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(avPlayerView == nil)
+                #elseif os(iOS)
+                Button { isFullScreen = true } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.65))
+                }
+                .buttonStyle(.plain)
                 #endif
             }
         }
@@ -165,7 +257,6 @@ final class VideoFullScreenController: NSObject, NSWindowDelegate {
 
         NSApp.presentationOptions = [.autoHideMenuBar, .autoHideDock]
 
-        // Detach the AVPlayer from the inline view and hand it to the fullscreen view.
         inlineView.player = nil
         let fsView = AVPlayerView(frame: bounds)
         fsView.player = player
@@ -173,13 +264,9 @@ final class VideoFullScreenController: NSObject, NSWindowDelegate {
         fsView.autoresizingMask = [.width, .height]
         self.fullScreenView = fsView
 
-        // Plain NSView container — no SwiftUI hosting in the z-order where the
-        // close button lives, so we never close the window from within a SwiftUI
-        // action handler (which caused the objc_release crash).
         let container = NSView(frame: bounds)
         container.addSubview(fsView)
 
-        // Close button: a minimal NSButton so teardown is purely AppKit.
         let btn = makeExitButton(screenHeight: screen.frame.size.height)
         container.addSubview(btn)
 
@@ -189,8 +276,6 @@ final class VideoFullScreenController: NSObject, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        // Level above NSMainMenuWindowLevel (24) so the window sits over the
-        // menu bar even when it briefly auto-shows at the screen edge.
         w.level = NSWindow.Level(rawValue: NSWindow.Level.mainMenu.rawValue + 2)
         w.backgroundColor = .black
         w.isOpaque = true
@@ -222,25 +307,19 @@ final class VideoFullScreenController: NSObject, NSWindowDelegate {
 
     @objc func dismiss() {
         guard let w = window else { return }
-        window = nil           // block re-entry before anything async runs
+        window = nil
 
         NSApp.presentationOptions = []
 
         if let monitor = keyMonitor { NSEvent.removeMonitor(monitor); keyMonitor = nil }
 
-        // Return the player to the inline view synchronously.
         fullScreenView?.player = nil
         fullScreenView = nil
         inlineView?.player = player
 
-        // Defer the actual NSWindow.close() to the next run-loop turn.
-        // Calling close() synchronously from within an NSButton action that lives
-        // inside this window's contentView can corrupt AppKit's event-dispatch
-        // state (objc_release crash). Dispatching async avoids that entirely.
         DispatchQueue.main.async { w.close() }
     }
 
-    // NSWindowDelegate: safety net if the window is closed by other means.
     func windowWillClose(_ notification: Notification) {
         guard window != nil else { return }
         dismiss()
@@ -249,7 +328,7 @@ final class VideoFullScreenController: NSObject, NSWindowDelegate {
 
 #endif
 
-// MARK: - Shared coordinator
+// MARK: - Shared WebView coordinator (macOS + iOS)
 
 #if !os(tvOS)
 final class VideoPlayerCoordinator: NSObject, WKNavigationDelegate {
@@ -373,7 +452,7 @@ struct NativeVideoPlayer: NSViewRepresentable {
     func updateNSView(_ view: AVPlayerView, context: Context) {}
 }
 
-#elseif !os(tvOS)
+#elseif os(iOS)
 
 struct WebVideoPlayer: UIViewRepresentable {
     let url: URL
@@ -393,6 +472,8 @@ struct NativeVideoPlayer: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let vc = AVPlayerViewController()
+        vc.videoGravity = .resizeAspect
+        vc.showsPlaybackControls = true
         let player = AVPlayer(url: url)
         vc.player = player
         player.play()
@@ -404,7 +485,8 @@ struct NativeVideoPlayer: UIViewControllerRepresentable {
 
 #else
 
-// tvOS: WKWebView is unavailable — try to parse the stream URL directly from the match page HTML.
+// MARK: tvOS — WebKit not available; extract stream URL from raw HTML
+
 struct WebVideoPlayer: View {
     let url: URL
     var onPageLoaded: (() -> Void)? = nil
@@ -415,47 +497,151 @@ struct WebVideoPlayer: View {
     }
 
     private func fetchStream() async {
+        let config = URLSessionConfiguration.default
+        config.httpCookieStorage = HTTPCookieStorage.shared
+        config.httpCookieAcceptPolicy = .always
+        config.httpShouldSetCookies = true
+        let session = URLSession(configuration: config)
+
         var request = URLRequest(url: url)
         request.setValue(JS.userAgent, forHTTPHeaderField: "User-Agent")
-        if let cookies = HTTPCookieStorage.shared.cookies(for: url) {
-            for (k, v) in HTTPCookie.requestHeaderFields(with: cookies) {
-                request.setValue(v, forHTTPHeaderField: k)
-            }
-        }
-        guard let (data, _) = try? await URLSession.shared.data(for: request),
+
+        guard let (data, _) = try? await session.data(for: request),
               let html = String(data: data, encoding: .utf8) else {
             onPageLoaded?(); return
         }
         onPageLoaded?()
 
-        // The page embeds the video URL as `new Video("BASE64...")`.
-        // Decode it directly — no JS execution needed.
-        guard let regex = try? NSRegularExpression(pattern: #"new Video\("([A-Za-z0-9+/=\s]+)"\)"#),
+        if let streamURL = extractStreamURL(from: html) {
+            onStreamURL?(streamURL)
+        }
+    }
+
+    private func extractStreamURL(from html: String) -> URL? {
+        if let url = extractBase64URL(from: html, pattern: #"new Video\(["']([A-Za-z0-9+/=\s]+)["']\)"#) {
+            return url
+        }
+        if let url = extractBase64URL(from: html, pattern: #"atob\(["']([A-Za-z0-9+/=\s]+)["']\)"#) {
+            return url
+        }
+        return extractDirectM3U8URL(from: html)
+    }
+
+    private func extractBase64URL(from html: String, pattern: String) -> URL? {
+        guard let regex = try? NSRegularExpression(pattern: pattern),
               let match = regex.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
               match.numberOfRanges > 1,
-              let range = Range(match.range(at: 1), in: html) else { return }
+              let range = Range(match.range(at: 1), in: html) else { return nil }
 
         let b64 = String(html[range]).components(separatedBy: .whitespacesAndNewlines).joined()
         guard let decoded = Data(base64Encoded: b64),
               let urlString = String(data: decoded, encoding: .utf8),
-              let streamURL = URL(string: urlString) else { return }
+              !urlString.hasPrefix("blob:"),
+              let url = URL(string: urlString) else { return nil }
+        return url
+    }
 
-        onStreamURL?(streamURL)
+    private func extractDirectM3U8URL(from html: String) -> URL? {
+        guard let regex = try? NSRegularExpression(pattern: #"https?://[^\s"'<>]+\.m3u8[^\s"'<>]*"#),
+              let match = regex.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+              let range = Range(match.range(at: 0), in: html),
+              let url = URL(string: String(html[range])) else { return nil }
+        return url
     }
 }
 
+// MARK: tvOS native player — custom VC so AVPlayerViewController owns the focus
+
 struct NativeVideoPlayer: UIViewControllerRepresentable {
     let url: URL
+    let onClose: () -> Void
 
-    func makeUIViewController(context: Context) -> AVPlayerViewController {
-        let vc = AVPlayerViewController()
-        let player = AVPlayer(url: url)
-        vc.player = player
-        player.play()
-        return vc
+    func makeUIViewController(context: Context) -> TVVideoPlayerViewController {
+        TVVideoPlayerViewController(url: url, onClose: onClose)
     }
 
-    func updateUIViewController(_ vc: AVPlayerViewController, context: Context) {}
+    func updateUIViewController(_ vc: TVVideoPlayerViewController, context: Context) {}
+}
+
+final class TVVideoPlayerViewController: UIViewController {
+    private let url: URL
+    private let onClose: () -> Void
+    private var playerVC: AVPlayerViewController!
+
+    init(url: URL, onClose: @escaping () -> Void) {
+        self.url = url
+        self.onClose = onClose
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+
+        let player = AVPlayer(url: url)
+        playerVC = AVPlayerViewController()
+        playerVC.player = player
+        playerVC.showsPlaybackControls = true
+
+        // Back button shown/hidden in sync with the transport controls overlay
+        playerVC.customOverlayViewController = TVBackButtonViewController { [weak self] in
+            self?.onClose()
+        }
+
+        addChild(playerVC)
+        view.addSubview(playerVC.view)
+        playerVC.view.frame = view.bounds
+        playerVC.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        playerVC.didMove(toParent: self)
+
+        player.play()
+    }
+
+    // Intercept the remote's menu/back button to dismiss the player
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if presses.contains(where: { $0.type == .menu }) {
+            onClose()
+        } else {
+            super.pressesBegan(presses, with: event)
+        }
+    }
+}
+
+final class TVBackButtonViewController: UIViewController {
+    private let onBack: () -> Void
+
+    init(onBack: @escaping () -> Void) {
+        self.onBack = onBack
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .clear
+
+        var config = UIButton.Configuration.plain()
+        config.image = UIImage(systemName: "chevron.left")
+        config.title = "Back"
+        config.baseForegroundColor = .white
+        config.imagePadding = 8
+        config.preferredSymbolConfigurationForImage =
+            UIImage.SymbolConfiguration(pointSize: 22, weight: .semibold)
+
+        let button = UIButton(configuration: config)
+        button.addTarget(self, action: #selector(backTapped), for: .primaryActionTriggered)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(button)
+
+        NSLayoutConstraint.activate([
+            button.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 40),
+            button.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 60)
+        ])
+    }
+
+    @objc private func backTapped() { onBack() }
 }
 
 #endif

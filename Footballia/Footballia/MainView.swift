@@ -25,7 +25,7 @@ struct MainView: View {
                 .zIndex(10)
             }
         }
-        #if !os(tvOS)
+        #if os(macOS)
         .frame(minWidth: 1000, idealWidth: 1280, minHeight: 660, idealHeight: 800)
         #endif
     }

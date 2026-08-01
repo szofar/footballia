@@ -9,6 +9,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.util.Log
 import net.footballia.R
+import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -34,6 +35,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import net.footballia.data.Match
 
 private const val STREAM_TIMEOUT_MS = 25_000L
+private const val CONTROLLER_TIMEOUT_MS = 7_000
 
 @OptIn(UnstableApi::class)
 @Composable
@@ -43,6 +45,10 @@ fun VideoPlayerScreen(match: Match, onClose: () -> Unit) {
     var streamUrl by remember { mutableStateOf<String?>(null) }
     var isLoading by remember { mutableStateOf(true) }
     var loadFailed by remember { mutableStateOf(false) }
+    var controlsVisible by remember { mutableStateOf(false) }
+
+    // Remote's back button exits the video instead of navigating within it.
+    BackHandler(onBack = onClose)
 
     // Receive stream URL from JS bridge on the main coroutine. Give up after a
     // timeout instead of spinning forever if the page never yields a stream.
@@ -128,9 +134,22 @@ fun VideoPlayerScreen(match: Match, onClose: () -> Unit) {
                     val view = LayoutInflater.from(ctx)
                         .inflate(R.layout.video_player_view, null) as PlayerView
                     view.player = player
+                    // Standard play/pause/seek controls, shown on D-pad center press
+                    // (built into PlayerView for TV) and auto-hidden after 7s idle.
+                    view.controllerShowTimeoutMs = CONTROLLER_TIMEOUT_MS
+                    view.setControllerVisibilityListener(
+                        PlayerView.ControllerVisibilityListener { visibility ->
+                            controlsVisible = visibility == android.view.View.VISIBLE
+                        }
+                    )
                     view
                 },
-                update = { view -> view.player = player },
+                update = { view ->
+                    view.player = player
+                    // requestFocus() in factory() can no-op if the view isn't attached
+                    // to the window yet; update() reliably runs after attachment.
+                    if (!view.hasFocus()) view.requestFocus()
+                },
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -156,25 +175,28 @@ fun VideoPlayerScreen(match: Match, onClose: () -> Unit) {
             }
         }
 
-        // Top bar (always visible so user can go back even while loading)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .align(Alignment.TopCenter)
-                .background(Color.Black.copy(alpha = if (isLoading || loadFailed) 1f else 0.55f))
-                .padding(horizontal = 20.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            IconButton(onClick = onClose) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White.copy(alpha = 0.7f))
-            }
-            Column(modifier = Modifier.weight(1f)) {
-                Text(match.title, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, maxLines = 1)
-                val meta = listOf(match.competition, match.stage, match.date)
-                    .filter { it.isNotEmpty() }.joinToString("  ·  ")
-                if (meta.isNotEmpty()) {
-                    Text(meta, color = Color.White.copy(alpha = 0.38f), fontSize = 12.sp, maxLines = 1)
+        // Top bar: shown while loading/failed (so the user can always go back),
+        // and otherwise only while the playback controls overlay is visible.
+        if (isLoading || loadFailed || controlsVisible) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.TopCenter)
+                    .background(Color.Black.copy(alpha = if (isLoading || loadFailed) 1f else 0.55f))
+                    .padding(horizontal = 20.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                IconButton(onClick = onClose) {
+                    Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White.copy(alpha = 0.7f))
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(match.title, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, maxLines = 1)
+                    val meta = listOf(match.competition, match.stage, match.date)
+                        .filter { it.isNotEmpty() }.joinToString("  ·  ")
+                    if (meta.isNotEmpty()) {
+                        Text(meta, color = Color.White.copy(alpha = 0.38f), fontSize = 12.sp, maxLines = 1)
+                    }
                 }
             }
         }

@@ -66,30 +66,6 @@
       "size": "512x512",
       "filename": "icon_1024.png"
     },
-    {
-      "idiom": "tv",
-      "scale": "1x",
-      "size": "400x240",
-      "filename": "icon_tv_400x240.png"
-    },
-    {
-      "idiom": "tv",
-      "scale": "2x",
-      "size": "400x240",
-      "filename": "icon_tv_800x480.png"
-    },
-    {
-      "idiom": "tv-top-shelf",
-      "scale": "1x",
-      "size": "1920x720",
-      "filename": "icon_tv_topshelf_1920x720.png"
-    },
-    {
-      "idiom": "tv-top-shelf",
-      "scale": "2x",
-      "size": "1920x720",
-      "filename": "icon_tv_topshelf_3840x1440.png"
-    }
   ],
   "info": {
     "author": "xcode",
