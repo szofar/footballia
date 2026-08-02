@@ -117,16 +117,16 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
     var searchPaginationReversed by mutableStateOf(true); private set
     var activeSuggestion by mutableStateOf<SearchSuggestion?>(null); private set
 
-    // Calendar. Backed by a per-year event feed (one fetch per year, then cached), so switching
-    // months and picking a day are both instant and never hit an endpoint that ignores the date.
+    // Calendar — backed by a per-year event feed (one fetch per year, then cached).
     private val calendarCache = mutableMapOf<Int, Map<String, List<Match>>>()
-    var calendarMatchDays by mutableStateOf<Set<Int>>(emptySet()); private set
-    var calendarSelectedDay by mutableStateOf<Int?>(null); private set
-    var calendarMatches by mutableStateOf<List<Match>>(emptyList()); private set
-    var calendarYear by mutableStateOf(Calendar.getInstance().get(Calendar.YEAR)); private set
-    var calendarMonth by mutableStateOf(Calendar.getInstance().get(Calendar.MONTH) + 1); private set
-    var isLoadingCalendar by mutableStateOf(false); private set
-    private var calendarStarted = false
+    private var calendarListRawSections: List<CalendarSectionData> = emptyList()
+    private var calendarListNextFetchEndMs: Long = System.currentTimeMillis()
+    private var calendarListLoaded = false
+
+    /** Sections shown in the UI (filtered when [calendarShowFavoritesOnly] is true). */
+    var calendarListSections by mutableStateOf<List<CalendarSectionData>>(emptyList()); private set
+    var calendarShowFavoritesOnly by mutableStateOf(false)
+    var isLoadingMoreCalendar by mutableStateOf(false); private set
 
     fun login(email: String, password: String) {
         viewModelScope.launch {
@@ -153,9 +153,11 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
     fun logout() {
         isLoggedIn = false
         matches = emptyList(); favoriteTeams = emptyList(); competitionCategories = emptyList()
-        searchResults = emptyList(); searchSuggestions = emptyList(); calendarMatchDays = emptySet()
-        calendarCache.clear(); calendarStarted = false
-        calendarSelectedDay = null; calendarMatches = emptyList()
+        searchResults = emptyList(); searchSuggestions = emptyList()
+        calendarCache.clear()
+        calendarListSections = emptyList(); calendarListRawSections = emptyList()
+        calendarListLoaded = false; calendarListNextFetchEndMs = System.currentTimeMillis()
+        calendarShowFavoritesOnly = false
         currentPage = 1; hasNextPage = false; paginationReversed = false
         currentFilter = MatchFilter.All; activeSuggestion = null
         favoritesLoaded = false
@@ -389,63 +391,76 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
         searchCurrentPage = 1; searchHasNextPage = false
     }
 
-    /**
-     * Opens the calendar on the most recent month that actually has matches.
-     *
-     * The archive lags real time (uploads trail fixtures by a few weeks), so landing on today's
-     * month would usually show an empty grid. The latest date not in the future is used instead,
-     * falling back to the previous year if the current one hasn't been populated yet.
-     */
-    fun startCalendar() {
-        if (calendarStarted) return
-        calendarStarted = true
+    /** First-visit entry point. Loads the most-recent 14-day window; no-op on revisits. */
+    fun startCalendarList() {
+        if (calendarListLoaded) return
+        calendarListLoaded = true
+        calendarListNextFetchEndMs = System.currentTimeMillis()
+        calendarListRawSections = emptyList()
+        loadMoreCalendarList()
+    }
+
+    /** Appends the next 14-day window (going further back in time) to the displayed list. */
+    fun loadMoreCalendarList() {
+        if (isLoadingMoreCalendar) return
         viewModelScope.launch {
-            isLoadingCalendar = true
-            val today = Calendar.getInstance()
-            val thisYear = today.get(Calendar.YEAR)
-            val todayIso = String.format(
-                "%04d-%02d-%02d", thisYear, today.get(Calendar.MONTH) + 1, today.get(Calendar.DAY_OF_MONTH)
-            )
+            isLoadingMoreCalendar = true
+            try {
+                val windowEndCal = Calendar.getInstance().also { it.timeInMillis = calendarListNextFetchEndMs }
+                val windowStartCal = Calendar.getInstance().also {
+                    it.timeInMillis = calendarListNextFetchEndMs
+                    it.add(Calendar.DAY_OF_MONTH, -14)
+                }
 
-            var landing: String? = null
-            for (year in listOf(thisYear, thisYear - 1)) {
-                val data = fetchCalendarYear(year)
-                landing = data.keys.filter { it <= todayIso }.maxOrNull() ?: data.keys.maxOrNull()
-                if (landing != null) break
-            }
+                val endYear = windowEndCal.get(Calendar.YEAR)
+                val startYear = windowStartCal.get(Calendar.YEAR)
+                fetchCalendarYear(endYear)
+                if (startYear != endYear) fetchCalendarYear(startYear)
 
-            if (landing != null) {
-                calendarYear = landing.take(4).toInt()
-                calendarMonth = landing.substring(5, 7).toInt()
-            } else if (hasMasterAccess != false) {
-                // Nothing loaded and the account isn't gated, so this was a failed fetch —
-                // let the next visit try again instead of leaving an empty grid forever.
-                calendarStarted = false
+                // Iterate (windowEnd - 1 day) down to windowStart, inclusive.
+                val current = Calendar.getInstance().also {
+                    it.timeInMillis = calendarListNextFetchEndMs
+                    it.add(Calendar.DAY_OF_MONTH, -1)
+                }
+                val newSections = mutableListOf<CalendarSectionData>()
+                while (!current.before(windowStartCal)) {
+                    val year  = current.get(Calendar.YEAR)
+                    val month = current.get(Calendar.MONTH) + 1
+                    val day   = current.get(Calendar.DAY_OF_MONTH)
+                    val dateStr = String.format("%04d-%02d-%02d", year, month, day)
+                    val matches = calendarCache[year]?.get(dateStr).orEmpty()
+                    if (matches.isNotEmpty()) {
+                        newSections.add(CalendarSectionData(date = dateStr, matches = matches))
+                    }
+                    current.add(Calendar.DAY_OF_MONTH, -1)
+                }
+
+                calendarListRawSections = calendarListRawSections + newSections
+                calendarListNextFetchEndMs = windowStartCal.timeInMillis
+                refreshCalendarListSections()
+            } finally {
+                isLoadingMoreCalendar = false
             }
-            refreshCalendarMonth()
-            isLoadingCalendar = false
         }
     }
 
-    fun loadCalendar(year: Int, month: Int) {
-        calendarYear = year
-        calendarMonth = month
-        calendarSelectedDay = null
-        calendarMatches = emptyList()
-        viewModelScope.launch {
-            isLoadingCalendar = true
-            fetchCalendarYear(year)
-            refreshCalendarMonth()
-            isLoadingCalendar = false
-        }
+    fun setCalendarFavoritesOnly(value: Boolean) {
+        calendarShowFavoritesOnly = value
+        refreshCalendarListSections()
     }
 
-    /** Selecting a day is a pure lookup in the cached year — no request, no unfiltered results. */
-    fun selectCalendarDay(day: Int?) {
-        calendarSelectedDay = day
-        calendarMatches = if (day == null) emptyList() else {
-            val key = String.format("%04d-%02d-%02d", calendarYear, calendarMonth, day)
-            calendarCache[calendarYear]?.get(key).orEmpty()
+    private fun refreshCalendarListSections() {
+        calendarListSections = if (calendarShowFavoritesOnly && favoriteTeams.isNotEmpty()) {
+            val names = favoriteTeams.map { it.name.lowercase() }.toSet()
+            calendarListRawSections.mapNotNull { section ->
+                val filtered = section.matches.filter { match ->
+                    names.contains(match.homeTeam.lowercase()) ||
+                    names.contains(match.awayTeam.lowercase())
+                }
+                if (filtered.isEmpty()) null else section.copy(matches = filtered)
+            }
+        } else {
+            calendarListRawSections
         }
     }
 
@@ -461,13 +476,5 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
         // Only a successful fetch is cached, so a network blip retries instead of sticking empty.
         if (data.isNotEmpty()) calendarCache[year] = data
         return data
-    }
-
-    private fun refreshCalendarMonth() {
-        val prefix = String.format("%04d-%02d-", calendarYear, calendarMonth)
-        calendarMatchDays = calendarCache[calendarYear].orEmpty().keys
-            .filter { it.startsWith(prefix) }
-            .mapNotNull { it.substring(8).toIntOrNull() }
-            .toSet()
     }
 }

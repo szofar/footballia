@@ -2,6 +2,9 @@ package net.footballia.data
 
 const val BASE_URL = "https://footballia.eu"
 
+/** A group of matches that all took place on the same ISO date (yyyy-MM-dd). */
+data class CalendarSectionData(val date: String, val matches: List<Match>)
+
 data class Match(
     val id: String,
     val slug: String,
