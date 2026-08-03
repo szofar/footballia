@@ -1,11 +1,13 @@
 import SwiftUI
 
-/// The Favorites page: a grid of cards for the cached top-teams list.
-/// Selecting a team drills into that team's matches, most recent first.
+/// The Favorites page: a grid of cards for the cached top-teams list, followed by a
+/// rolling two-week match feed from the calendar. Selecting a team drills into that
+/// team's matches, most recent first.
 struct FavoritesView: View {
     @Environment(FootballiaService.self) private var service
     @State private var selectedTeam: Team? = nil
     @State private var selectedMatch: Match? = nil
+    @FocusState private var loadMoreFocused: Bool
 
     var body: some View {
         ZStack {
@@ -58,17 +60,20 @@ struct FavoritesView: View {
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.82), value: selectedTeam != nil)
         .task {
-            // Seeds the cache on first ever launch. An empty list with a cache present means the
-            // user cleared it on purpose, so it is left alone rather than silently repopulated.
-            await service.loadFavoriteTeams()
+            // First visit: both calls hit the network (homepage for team seeding + calendar year).
+            // Subsequent visits: loadFavoriteTeams reads disk, startCalendarList is a no-op.
+            async let fav: () = service.loadFavoriteTeams()
+            async let cal: () = service.startCalendarList()
+            _ = await (fav, cal)
         }
     }
 
-    // MARK: - Team grid
+    // MARK: - Team grid + calendar feed
 
     private var teamGrid: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 0) {
+                // Header
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Favorites")
                         .font(.system(size: 26, weight: .bold))
@@ -79,9 +84,11 @@ struct FavoritesView: View {
                         .font(.subheadline)
                         .foregroundColor(.white.opacity(0.35))
                 }
-                .padding(.horizontal, horizontalPadding)
+                .padding(.horizontal, hPad)
                 .padding(.top, 30)
+                .padding(.bottom, 24)
 
+                // Team cards
                 if service.favoriteTeams.isEmpty {
                     VStack(spacing: 10) {
                         if FavoriteTeamsStore.hasCache {
@@ -98,7 +105,7 @@ struct FavoritesView: View {
                                 .foregroundColor(.white.opacity(0.3))
                         }
                     }
-                    .frame(maxWidth: .infinity, minHeight: 220)
+                    .frame(maxWidth: .infinity, minHeight: 160)
                 } else {
                     let columns = [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 16)]
                     LazyVGrid(columns: columns, spacing: 16) {
@@ -109,7 +116,13 @@ struct FavoritesView: View {
                             }
                         }
                     }
-                    .padding(.horizontal, horizontalPadding)
+                    .padding(.horizontal, hPad)
+                }
+
+                // Calendar match feed
+                let sections = service.calendarListSections
+                if !sections.isEmpty || service.isLoadingMoreCalendar {
+                    calendarFeed(sections: sections)
                 }
             }
             .padding(.bottom, 28)
@@ -117,12 +130,198 @@ struct FavoritesView: View {
         .scrollIndicators(.hidden)
     }
 
-    private var horizontalPadding: CGFloat {
+    // MARK: - Calendar feed
+
+    private func calendarFeed(sections: [CalendarSection]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Divider + section header
+            Rectangle()
+                .fill(Color.white.opacity(0.06))
+                .frame(height: 1)
+                .padding(.horizontal, hPad)
+                .padding(.top, 32)
+
+            HStack {
+                Text("Recent Matches")
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundColor(.white)
+                Spacer()
+                if service.isLoadingMoreCalendar {
+                    ProgressView().tint(.green).controlSize(.small)
+                }
+            }
+            .padding(.horizontal, hPad)
+            .padding(.top, 20)
+            .padding(.bottom, 16)
+
+            // Date section rows
+            ForEach(sections) { section in
+                calendarSectionRow(section: section,
+                                   isLast: section.id == sections.last?.id)
+            }
+
+            #if !os(tvOS)
+            // macOS: load-more button sits below the sections
+            calendarLoadMoreButton
+                .padding(.horizontal, hPad)
+                .padding(.top, 20)
+            #endif
+
+            // Favorites-only toggle
+            calendarFavoritesToggle
+                .padding(.horizontal, hPad)
+                .padding(.top, 16)
+        }
+    }
+
+    private func calendarSectionRow(section: CalendarSection, isLast: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(formatCalendarDate(section.date))
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(.white.opacity(0.55))
+                .padding(.horizontal, hPad)
+
+            ScrollView(.horizontal) {
+                LazyHStack(spacing: 16) {
+                    ForEach(section.matches) { match in
+                        calendarMatchCard(for: match)
+                    }
+
+                    #if os(tvOS)
+                    if isLast { calendarLoadMoreCard }
+                    #endif
+                }
+                .padding(.horizontal, hPad)
+            }
+            .scrollIndicators(.hidden)
+        }
+        .padding(.top, 16)
+        .padding(.bottom, 4)
+    }
+
+    @ViewBuilder
+    private func calendarMatchCard(for match: Match) -> some View {
+        #if os(tvOS)
+        Button { selectedMatch = match } label: {
+            VideoCardView(match: match).frame(width: 300)
+        }
+        .buttonStyle(.plain)
+        .focusEffectDisabled()
+        #else
+        VideoCardView(match: match)
+            .frame(width: 260)
+            .onTapGesture { selectedMatch = match }
+        #endif
+    }
+
+    // tvOS: "More weeks" card appended to the right of the last date row
+    private var calendarLoadMoreCard: some View {
+        Button {
+            Task { await service.loadMoreCalendarList() }
+        } label: {
+            VStack(spacing: 10) {
+                if service.isLoadingMoreCalendar {
+                    ProgressView().tint(.green).scaleEffect(0.85)
+                } else {
+                    Image(systemName: "chevron.right.2")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundColor(.green)
+                    Text("More\nweeks")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.white.opacity(0.45))
+                        .multilineTextAlignment(.center)
+                }
+            }
+            .frame(width: 100, height: 168)
+            .background(Color.white.opacity(0.05))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .focused($loadMoreFocused)
+        .onChange(of: loadMoreFocused) { _, focused in
+            if focused && !service.isLoadingMoreCalendar {
+                Task { await service.loadMoreCalendarList() }
+            }
+        }
+    }
+
+    // macOS: text button below the date rows
+    private var calendarLoadMoreButton: some View {
+        Button {
+            Task { await service.loadMoreCalendarList() }
+        } label: {
+            HStack(spacing: 8) {
+                if service.isLoadingMoreCalendar {
+                    ProgressView().tint(.green).controlSize(.small)
+                    Text("Loading…")
+                        .font(.system(size: 13))
+                        .foregroundColor(.white.opacity(0.4))
+                } else {
+                    Text("Load previous weeks")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.green)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.green)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+            .background(Color.green.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(Color.green.opacity(0.2), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(service.isLoadingMoreCalendar)
+    }
+
+    private var calendarFavoritesToggle: some View {
+        HStack {
+            Text("Show only favorite teams")
+                .font(.system(size: 14))
+                .foregroundColor(.white.opacity(0.6))
+            Spacer()
+            Toggle("", isOn: Binding(
+                get: { service.calendarShowFavoritesOnly },
+                set: { service.calendarShowFavoritesOnly = $0 }
+            ))
+            .tint(.green)
+            .labelsHidden()
+        }
+        .padding(.vertical, 12)
+        .padding(.horizontal, 20)
+        .background(Color.white.opacity(0.04))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
+        )
+    }
+
+    // MARK: - Helpers
+
+    private var hPad: CGFloat {
         #if os(tvOS)
         return 100
         #else
         return 28
         #endif
+    }
+
+    private func formatCalendarDate(_ iso: String) -> String {
+        let parser = DateFormatter()
+        parser.dateFormat = "yyyy-MM-dd"
+        guard let date = parser.date(from: iso) else { return iso }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEEE, MMMM d"
+        return formatter.string(from: date)
     }
 
     // MARK: - Back bar
@@ -176,8 +375,6 @@ struct TeamCardView: View {
     var body: some View {
         Button(action: onTap) {
             VStack(spacing: 12) {
-                // A nil URL (no crest resolved) never reaches AsyncImage's .failure phase, so
-                // the placeholder has to be chosen up front rather than in the phase switch.
                 Group {
                     if let logoURL = team.logoURL {
                         AsyncImage(url: logoURL) { phase in

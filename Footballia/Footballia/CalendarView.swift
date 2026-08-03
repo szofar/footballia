@@ -3,7 +3,15 @@ import SwiftUI
 struct CalendarView: View {
     @Environment(FootballiaService.self) private var service
     @State private var selectedMatch: Match? = nil
-    @FocusState private var loadMoreFocused: Bool
+
+    private var monthName: String {
+        let df = DateFormatter()
+        df.dateFormat = "MMMM"
+        var c = DateComponents()
+        c.year = service.calendarYear; c.month = service.calendarMonth; c.day = 1
+        let date = Calendar.current.date(from: c) ?? Date()
+        return df.string(from: date)
+    }
 
     var body: some View {
         ZStack {
@@ -23,7 +31,7 @@ struct CalendarView: View {
                 .zIndex(10)
             }
         }
-        .task { await service.startCalendarList() }
+        .task { await service.startCalendar() }
     }
 
     // MARK: - Master gate
@@ -33,12 +41,15 @@ struct CalendarView: View {
             Image(systemName: "lock.fill")
                 .font(.system(size: 40))
                 .foregroundColor(.white.opacity(0.15))
+
             Text("Calendar")
                 .font(.system(size: 22, weight: .bold))
                 .foregroundColor(.white.opacity(0.7))
+
             Text("This is a Master feature.")
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundColor(.white.opacity(0.5))
+
             Text("Sign up for Master access on footballia.eu to browse matches by date — along with many more features.")
                 .font(.subheadline)
                 .foregroundColor(.white.opacity(0.35))
@@ -50,14 +61,36 @@ struct CalendarView: View {
         .padding(.horizontal, 28)
     }
 
-    // MARK: - Calendar body
+    // MARK: - Calendar
 
     private var calendarBody: some View {
         VStack(spacing: 0) {
             calendarHeader
-            calendarContent
+            ScrollView {
+                VStack(spacing: 28) {
+                    monthGrid
+                        .padding(.horizontal, 28)
+                        .padding(.top, 24)
+
+                    if let day = service.calendarSelectedDay {
+                        matchesForDay(day)
+                            .padding(.horizontal, 28)
+                    } else {
+                        Text("Select a highlighted date to see its matches.")
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.3))
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 12)
+                    }
+
+                    Spacer(minLength: 28)
+                }
+            }
+            .scrollIndicators(.hidden)
         }
     }
+
+    // MARK: - Header
 
     private var calendarHeader: some View {
         HStack {
@@ -69,9 +102,32 @@ struct CalendarView: View {
                     .font(.subheadline)
                     .foregroundColor(.white.opacity(0.35))
             }
+
             Spacer()
-            if service.isLoadingMoreCalendar {
+
+            if service.isLoadingCalendar {
                 ProgressView().tint(.green).controlSize(.small)
+            }
+
+            HStack(spacing: 20) {
+                Button { stepMonth(by: -1) } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.6))
+                }
+                .buttonStyle(.plain)
+
+                Text(verbatim: "\(monthName) \(service.calendarYear)")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(minWidth: 140, alignment: .center)
+
+                Button { stepMonth(by: 1) } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.6))
+                }
+                .buttonStyle(.plain)
             }
         }
         .padding(.horizontal, 28)
@@ -82,192 +138,196 @@ struct CalendarView: View {
         }
     }
 
-    @ViewBuilder
-    private var calendarContent: some View {
-        let sections = service.calendarListSections
-        if sections.isEmpty && !service.isLoadingMoreCalendar {
-            emptyState
-        } else {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(sections) { section in
-                        dateSectionRow(section: section,
-                                       isLast: section.id == sections.last?.id)
-                    }
+    // MARK: - Month grid
 
-                    #if !os(tvOS)
-                    loadMoreButton
-                        .padding(.horizontal, 28)
-                        .padding(.top, 24)
-                    #endif
-
-                    favoritesToggle
-                        .padding(.horizontal, 28)
-                        .padding(.top, 20)
-                        .padding(.bottom, 28)
-                }
-            }
-            .scrollIndicators(.hidden)
-        }
-    }
-
-    private var emptyState: some View {
-        VStack(spacing: 12) {
-            ProgressView().tint(.green)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    // MARK: - Date section row
-
-    private func dateSectionRow(section: CalendarSection, isLast: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(formatDate(section.date))
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundColor(.white.opacity(0.6))
-                .padding(.horizontal, 28)
-
-            ScrollView(.horizontal) {
-                LazyHStack(spacing: 16) {
-                    ForEach(section.matches) { match in
-                        matchCardButton(for: match)
-                    }
-
-                    #if os(tvOS)
-                    if isLast {
-                        loadMoreCard
-                    }
-                    #endif
-                }
-                .padding(.horizontal, 28)
-            }
-            .scrollIndicators(.hidden)
-        }
-        .padding(.top, 20)
-        .padding(.bottom, 8)
-    }
-
-    // MARK: - Match card
-
-    @ViewBuilder
-    private func matchCardButton(for match: Match) -> some View {
-        #if os(tvOS)
-        Button { selectedMatch = match } label: {
-            VideoCardView(match: match)
-                .frame(width: 300)
-        }
-        .buttonStyle(.plain)
-        .focusEffectDisabled()
-        #else
-        VideoCardView(match: match)
-            .frame(width: 260)
-            .onTapGesture { selectedMatch = match }
-        #endif
-    }
-
-    // MARK: - Load more (tvOS card, appended to last section's horizontal row)
-
-    private var loadMoreCard: some View {
-        Button {
-            Task { await service.loadMoreCalendarList() }
-        } label: {
-            VStack(spacing: 10) {
-                if service.isLoadingMoreCalendar {
-                    ProgressView().tint(.green).scaleEffect(0.85)
-                } else {
-                    Image(systemName: "chevron.right.2")
-                        .font(.system(size: 20, weight: .semibold))
-                        .foregroundColor(.green)
-                    Text("More\nweeks")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.white.opacity(0.45))
-                        .multilineTextAlignment(.center)
-                }
-            }
-            .frame(width: 100, height: 168)
-            .background(Color.white.opacity(0.05))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
-        .focused($loadMoreFocused)
-        .onChange(of: loadMoreFocused) { _, focused in
-            if focused && !service.isLoadingMoreCalendar {
-                Task { await service.loadMoreCalendarList() }
-            }
-        }
-    }
-
-    // MARK: - Load more (macOS button below sections)
-
-    private var loadMoreButton: some View {
-        Button {
-            Task { await service.loadMoreCalendarList() }
-        } label: {
-            HStack(spacing: 8) {
-                if service.isLoadingMoreCalendar {
-                    ProgressView().tint(.green).controlSize(.small)
-                    Text("Loading…")
-                        .font(.system(size: 13))
-                        .foregroundColor(.white.opacity(0.4))
-                } else {
-                    Text("Load previous weeks")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.green)
-                    Image(systemName: "chevron.right")
+    private var monthGrid: some View {
+        VStack(spacing: 6) {
+            // Day-of-week headers (Monday first)
+            HStack(spacing: 0) {
+                ForEach(["Mo","Tu","We","Th","Fr","Sa","Su"], id: \.self) { d in
+                    Text(d)
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(.green)
+                        .foregroundColor(.white.opacity(0.3))
+                        .frame(maxWidth: .infinity)
                 }
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 10)
-            .background(Color.green.opacity(0.08))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(Color.green.opacity(0.2), lineWidth: 1)
-            )
+
+            let days = computeDays()
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 7), spacing: 4) {
+                ForEach(0..<days.count, id: \.self) { i in
+                    if let day = days[i] {
+                        DayCell(
+                            day: day,
+                            hasMatch: service.calendarMatchDays.contains(day),
+                            isSelected: service.calendarSelectedDay == day
+                        ) {
+                            guard service.calendarMatchDays.contains(day) else { return }
+                            service.selectCalendarDay(service.calendarSelectedDay == day ? nil : day)
+                        }
+                    } else {
+                        Color.clear.frame(height: 38)
+                    }
+                }
+            }
         }
-        .buttonStyle(.plain)
-        .disabled(service.isLoadingMoreCalendar)
     }
 
-    // MARK: - Favorites toggle
+    // MARK: - Matches for selected day
 
-    private var favoritesToggle: some View {
-        HStack {
-            Text("Show only favorite teams")
-                .font(.system(size: 14))
-                .foregroundColor(.white.opacity(0.6))
-            Spacer()
-            Toggle("", isOn: Binding(
-                get: { service.calendarShowFavoritesOnly },
-                set: { service.calendarShowFavoritesOnly = $0 }
-            ))
-            .tint(.green)
-            .labelsHidden()
+    @ViewBuilder
+    private func matchesForDay(_ day: Int) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("\(monthName) \(day)")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(.white)
+                Spacer()
+            }
+
+            if let availableAfter = availableAfterDate(day: day) {
+                tooRecentBanner(availableAfter: availableAfter)
+            } else if service.calendarMatches.isEmpty {
+                Text("No matches found for this date.")
+                    .foregroundColor(.white.opacity(0.35))
+                    .font(.subheadline)
+            } else {
+                let columns = [GridItem(.adaptive(minimum: 230, maximum: 340), spacing: 16)]
+                LazyVGrid(columns: columns, spacing: 16) {
+                    ForEach(service.calendarMatches) { match in
+                        #if os(tvOS)
+                        Button { selectedMatch = match } label: {
+                            VideoCardView(match: match)
+                        }
+                        .buttonStyle(.plain)
+                        .focusEffectDisabled()
+                        #else
+                        VideoCardView(match: match)
+                            .onTapGesture { selectedMatch = match }
+                        #endif
+                    }
+                }
+            }
         }
-        .padding(.vertical, 12)
-        .padding(.horizontal, 20)
+    }
+
+    private func tooRecentBanner(availableAfter: Date) -> some View {
+        let df = DateFormatter()
+        df.dateStyle = .long
+        return HStack(spacing: 14) {
+            Image(systemName: "clock")
+                .font(.system(size: 22))
+                .foregroundColor(.white.opacity(0.25))
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Match not yet available")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.6))
+                Text("This match will be available after \(df.string(from: availableAfter)).")
+                    .font(.subheadline)
+                    .foregroundColor(.white.opacity(0.35))
+            }
+            Spacer()
+        }
+        .padding(16)
         .background(Color.white.opacity(0.04))
         .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(Color.white.opacity(0.06), lineWidth: 1)
-        )
+    }
+
+    /// Returns the date on which matches become watchable (game date + 30 days) if the
+    /// selected day falls within the 30-day embargo window; nil otherwise.
+    private func availableAfterDate(day: Int) -> Date? {
+        let cal = Calendar.current
+        var c = DateComponents()
+        c.year = service.calendarYear; c.month = service.calendarMonth; c.day = day
+        guard let gameDate = cal.date(from: c),
+              let cutoff = cal.date(byAdding: .day, value: -30, to: cal.startOfDay(for: Date()))
+        else { return nil }
+        guard cal.startOfDay(for: gameDate) >= cutoff else { return nil }
+        return cal.date(byAdding: .day, value: 30, to: gameDate)
     }
 
     // MARK: - Helpers
 
-    private func formatDate(_ iso: String) -> String {
-        let parser = DateFormatter()
-        parser.dateFormat = "yyyy-MM-dd"
-        guard let date = parser.date(from: iso) else { return iso }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "EEEE, MMMM d"
-        return formatter.string(from: date)
+    private func stepMonth(by delta: Int) {
+        var m = service.calendarMonth + delta
+        var y = service.calendarYear
+        if m < 1  { m = 12; y -= 1 }
+        if m > 12 { m = 1;  y += 1 }
+        Task { await service.loadCalendar(year: y, month: m) }
+    }
+
+    private func computeDays() -> [Int?] {
+        var cal = Calendar(identifier: .gregorian)
+        cal.firstWeekday = 2  // Monday
+        var c = DateComponents()
+        c.year = service.calendarYear; c.month = service.calendarMonth; c.day = 1
+        guard let first = cal.date(from: c),
+              let range = cal.range(of: .day, in: .month, for: first) else { return [] }
+
+        let weekday = cal.component(.weekday, from: first)
+        // Convert to Monday-based offset (Mon=0 … Sun=6)
+        let offset = (weekday + 5) % 7
+
+        var days: [Int?] = Array(repeating: nil, count: offset)
+        days += (1...range.count).map { Int?($0) }
+        while days.count % 7 != 0 { days.append(nil) }
+        return days
+    }
+}
+
+// MARK: - Day cell
+
+private struct DayCell: View {
+    let day: Int
+    let hasMatch: Bool
+    let isSelected: Bool
+    let onTap: () -> Void
+    #if os(tvOS)
+    @Environment(\.isFocused) private var isFocused
+    private var isHighlighted: Bool { isFocused }
+    #else
+    @State private var isHovered = false
+    private var isHighlighted: Bool { isHovered }
+    #endif
+
+    var body: some View {
+        Button(action: onTap) {
+            Text("\(day)")
+                .font(.system(size: 13, weight: hasMatch ? .semibold : .regular))
+                .foregroundColor(foreground)
+                .frame(maxWidth: .infinity)
+                .frame(height: 38)
+                .background(background)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(borderColor, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(!hasMatch)
+        #if !os(tvOS)
+        .onHover { isHovered = $0 }
+        #endif
+        .animation(.easeInOut(duration: 0.12), value: isHighlighted)
+        .animation(.easeInOut(duration: 0.12), value: isSelected)
+    }
+
+    private var foreground: Color {
+        if isSelected { return .black }
+        if hasMatch   { return .green }
+        return .white.opacity(0.25)
+    }
+
+    private var background: Color {
+        if isSelected { return .green }
+        if isHighlighted && hasMatch { return .green.opacity(0.18) }
+        if hasMatch   { return .green.opacity(0.08) }
+        return .clear
+    }
+
+    private var borderColor: Color {
+        if isSelected { return .clear }
+        if hasMatch   { return .green.opacity(isHighlighted ? 0.5 : 0.2) }
+        return .clear
     }
 }

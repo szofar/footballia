@@ -119,6 +119,17 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
 
     // Calendar — backed by a per-year event feed (one fetch per year, then cached).
     private val calendarCache = mutableMapOf<Int, Map<String, List<Match>>>()
+
+    // Month-grid view state (CalendarScreen)
+    var calendarMatchDays by mutableStateOf<Set<Int>>(emptySet()); private set
+    var calendarSelectedDay by mutableStateOf<Int?>(null); private set
+    var calendarMatches by mutableStateOf<List<Match>>(emptyList()); private set
+    var calendarYear by mutableStateOf(Calendar.getInstance().get(Calendar.YEAR)); private set
+    var calendarMonth by mutableStateOf(Calendar.getInstance().get(Calendar.MONTH) + 1); private set
+    var isLoadingCalendar by mutableStateOf(false); private set
+    private var calendarStarted = false
+
+    // List view state (FavoritesScreen)
     private var calendarListRawSections: List<CalendarSectionData> = emptyList()
     private var calendarListNextFetchEndMs: Long = System.currentTimeMillis()
     private var calendarListLoaded = false
@@ -154,7 +165,8 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
         isLoggedIn = false
         matches = emptyList(); favoriteTeams = emptyList(); competitionCategories = emptyList()
         searchResults = emptyList(); searchSuggestions = emptyList()
-        calendarCache.clear()
+        calendarCache.clear(); calendarStarted = false
+        calendarMatchDays = emptySet(); calendarSelectedDay = null; calendarMatches = emptyList()
         calendarListSections = emptyList(); calendarListRawSections = emptyList()
         calendarListLoaded = false; calendarListNextFetchEndMs = System.currentTimeMillis()
         calendarShowFavoritesOnly = false
@@ -391,11 +403,73 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
         searchCurrentPage = 1; searchHasNextPage = false
     }
 
+    // MARK: - Calendar month-grid (CalendarScreen)
+
+    fun startCalendar() {
+        if (calendarStarted) return
+        calendarStarted = true
+        viewModelScope.launch {
+            isLoadingCalendar = true
+            val today = Calendar.getInstance()
+            val thisYear = today.get(Calendar.YEAR)
+            val todayIso = String.format(
+                "%04d-%02d-%02d", thisYear, today.get(Calendar.MONTH) + 1, today.get(Calendar.DAY_OF_MONTH)
+            )
+            var landing: String? = null
+            for (year in listOf(thisYear, thisYear - 1)) {
+                val data = fetchCalendarYear(year)
+                landing = data.keys.filter { it <= todayIso }.maxOrNull() ?: data.keys.maxOrNull()
+                if (landing != null) break
+            }
+            if (landing != null) {
+                calendarYear = landing.take(4).toInt()
+                calendarMonth = landing.substring(5, 7).toInt()
+            } else if (hasMasterAccess != false) {
+                calendarStarted = false
+            }
+            refreshCalendarMonth()
+            isLoadingCalendar = false
+        }
+    }
+
+    fun loadCalendar(year: Int, month: Int) {
+        calendarYear = year
+        calendarMonth = month
+        calendarSelectedDay = null
+        calendarMatches = emptyList()
+        viewModelScope.launch {
+            isLoadingCalendar = true
+            fetchCalendarYear(year)
+            refreshCalendarMonth()
+            isLoadingCalendar = false
+        }
+    }
+
+    fun selectCalendarDay(day: Int?) {
+        calendarSelectedDay = day
+        calendarMatches = if (day == null) emptyList() else {
+            val key = String.format("%04d-%02d-%02d", calendarYear, calendarMonth, day)
+            calendarCache[calendarYear]?.get(key).orEmpty()
+        }
+    }
+
+    private fun refreshCalendarMonth() {
+        val prefix = String.format("%04d-%02d-", calendarYear, calendarMonth)
+        calendarMatchDays = calendarCache[calendarYear].orEmpty().keys
+            .filter { it.startsWith(prefix) }
+            .mapNotNull { it.substring(8).toIntOrNull() }
+            .toSet()
+    }
+
+    // MARK: - Calendar list (FavoritesScreen)
+
     /** First-visit entry point. Loads the most-recent 14-day window; no-op on revisits. */
     fun startCalendarList() {
         if (calendarListLoaded) return
         calendarListLoaded = true
-        calendarListNextFetchEndMs = System.currentTimeMillis()
+        // Start 30 days back so the feed only ever shows matches old enough to be available.
+        calendarListNextFetchEndMs = Calendar.getInstance()
+            .also { it.add(Calendar.DAY_OF_MONTH, -30) }.timeInMillis
         calendarListRawSections = emptyList()
         loadMoreCalendarList()
     }

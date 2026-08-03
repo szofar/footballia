@@ -72,9 +72,12 @@ final class FootballiaService {
     var searchTotalPages      = 1
     var searchPaginationReversed = true
 
-    // MARK: - Calendar (legacy month-grid state — kept for Master-access check wiring)
+    // MARK: - Calendar (month-grid view)
+    var calendarMatchDays: Set<Int> = []
     var calendarYear  = Calendar.current.component(.year,  from: Date())
     var calendarMonth = Calendar.current.component(.month, from: Date())
+    var calendarSelectedDay: Int?
+    var calendarMatches: [Match] = []
     var isLoadingCalendar = false
 
     /// One entry per fetched year, keyed by ISO `yyyy-MM-dd`. `/calendar/<year>` returns the
@@ -82,7 +85,7 @@ final class FootballiaService {
     private var calendarCache: [Int: [String: [Match]]] = [:]
     private var calendarStarted = false
 
-    // MARK: - Calendar list view
+    // MARK: - Calendar list view (used by the Favorites page)
 
     /// Unfiltered sections in descending date order (newest first), built from `calendarCache`.
     private var calendarListRawSections: [CalendarSection] = []
@@ -209,6 +212,7 @@ final class FootballiaService {
         isLoggedIn = false
         matches = []; featuredTeams = []; competitionCategories = []
         searchResults = []; searchSuggestions = []
+        calendarMatchDays = []; calendarMatches = []; calendarSelectedDay = nil
         calendarCache = [:]; calendarStarted = false
         calendarListRawSections = []; calendarListLoaded = false
         calendarListNextFetchEnd = Date(); calendarShowFavoritesOnly = false
@@ -582,13 +586,72 @@ final class FootballiaService {
         searchHasNextPage = html.contains("rel=\"next\"")
     }
 
-    // MARK: - Calendar list loading
+    // MARK: - Calendar month-grid loading
+
+    /// Opens the calendar on the most recent month that actually has matches.
+    func startCalendar() async {
+        guard !calendarStarted else { return }
+        calendarStarted = true
+        isLoadingCalendar = true
+        defer { isLoadingCalendar = false }
+
+        let now = Date()
+        let cal = Calendar.current
+        let thisYear = cal.component(.year, from: now)
+        let todayISO = String(format: "%04d-%02d-%02d", thisYear,
+                              cal.component(.month, from: now), cal.component(.day, from: now))
+
+        var landing: String?
+        for year in [thisYear, thisYear - 1] {
+            let data = await fetchCalendarYear(year)
+            landing = data.keys.filter { $0 <= todayISO }.max() ?? data.keys.max()
+            if landing != nil { break }
+        }
+
+        if let landing, landing.count == 10 {
+            calendarYear  = Int(landing.prefix(4)) ?? calendarYear
+            calendarMonth = Int(landing.dropFirst(5).prefix(2)) ?? calendarMonth
+        } else if hasMasterAccess {
+            calendarStarted = false
+        }
+        refreshCalendarMonth()
+    }
+
+    func loadCalendar(year: Int, month: Int) async {
+        calendarYear = year
+        calendarMonth = month
+        calendarSelectedDay = nil
+        calendarMatches = []
+        isLoadingCalendar = true
+        defer { isLoadingCalendar = false }
+        _ = await fetchCalendarYear(year)
+        refreshCalendarMonth()
+    }
+
+    func selectCalendarDay(_ day: Int?) {
+        calendarSelectedDay = day
+        guard let day else { calendarMatches = []; return }
+        let key = String(format: "%04d-%02d-%02d", calendarYear, calendarMonth, day)
+        calendarMatches = calendarCache[calendarYear]?[key] ?? []
+    }
+
+    private func refreshCalendarMonth() {
+        let prefix = String(format: "%04d-%02d-", calendarYear, calendarMonth)
+        calendarMatchDays = Set(
+            (calendarCache[calendarYear] ?? [:]).keys
+                .filter { $0.hasPrefix(prefix) }
+                .compactMap { Int($0.suffix(2)) }
+        )
+    }
+
+    // MARK: - Calendar list loading (Favorites page)
 
     /// First-visit entry point. Loads the most recent 14-day window and is a no-op on revisits.
     func startCalendarList() async {
         guard !calendarListLoaded else { return }
         calendarListLoaded = true
-        calendarListNextFetchEnd = Date()
+        // Start 30 days back so the feed only ever shows matches old enough to be available.
+        calendarListNextFetchEnd = Calendar.current.date(byAdding: .day, value: -30, to: Date()) ?? Date()
         calendarListRawSections = []
         await loadMoreCalendarList()
     }
