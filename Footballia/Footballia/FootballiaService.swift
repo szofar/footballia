@@ -109,6 +109,18 @@ final class FootballiaService {
         }
     }
 
+    // MARK: - Tab cache (30-second freshness)
+    private var sectionLoadTimes: [String: Date] = [:]
+
+    func isStale(_ key: String) -> Bool {
+        guard let last = sectionLoadTimes[key] else { return true }
+        return Date().timeIntervalSince(last) > 30
+    }
+
+    func markLoaded(_ key: String) {
+        sectionLoadTimes[key] = Date()
+    }
+
     static let baseURL = "https://footballia.eu"
 
     private let session: URLSession
@@ -221,6 +233,7 @@ final class FootballiaService {
         currentPage = 1; hasNextPage = false; currentFilter = .all; paginationReversed = false
         hasMasterAccess = false; didCheckMasterAccess = false
         accountEmail = nil
+        sectionLoadTimes = [:]
         UserDefaults.standard.removeObject(forKey: "footballia.accountEmail")
         UserDefaults.standard.removeObject(forKey: Self.masterAccessKey)
         let s = HTTPCookieStorage.shared
@@ -480,8 +493,8 @@ final class FootballiaService {
 
     // MARK: - Competitions
 
-    func loadCompetitions() async {
-        guard competitionCategories.isEmpty else { return }
+    func loadCompetitions(force: Bool = false) async {
+        guard force || competitionCategories.isEmpty else { return }
         isLoadingCompetitions = true
         defer { isLoadingCompetitions = false }
 
@@ -589,8 +602,8 @@ final class FootballiaService {
     // MARK: - Calendar month-grid loading
 
     /// Opens the calendar on the most recent month that actually has matches.
-    func startCalendar() async {
-        guard !calendarStarted else { return }
+    func startCalendar(force: Bool = false) async {
+        guard force || !calendarStarted else { return }
         calendarStarted = true
         isLoadingCalendar = true
         defer { isLoadingCalendar = false }
@@ -647,8 +660,8 @@ final class FootballiaService {
     // MARK: - Calendar list loading (Favorites page)
 
     /// First-visit entry point. Loads the most recent 14-day window and is a no-op on revisits.
-    func startCalendarList() async {
-        guard !calendarListLoaded else { return }
+    func startCalendarList(force: Bool = false) async {
+        guard force || !calendarListLoaded else { return }
         calendarListLoaded = true
         // Start 30 days back so the feed only ever shows matches old enough to be available.
         calendarListNextFetchEnd = Calendar.current.date(byAdding: .day, value: -30, to: Date()) ?? Date()

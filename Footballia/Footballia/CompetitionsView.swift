@@ -52,7 +52,11 @@ struct CompetitionsView: View {
             }
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.82), value: selectedCompetition != nil)
-        .task { await service.loadCompetitions() }
+        .task {
+            let stale = service.isStale("competitions")
+            await service.loadCompetitions(force: stale)
+            service.markLoaded("competitions")
+        }
     }
 
     // MARK: - Catalogue

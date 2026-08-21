@@ -1,9 +1,18 @@
 import SwiftUI
 
+/// Which sections the Favorites page shows. On tvOS/macOS both live on one page
+/// (`.combined`); on mobile they're promoted to separate root tabs (`.teams` / `.recents`).
+enum FavoritesMode {
+    case combined
+    case teams
+    case recents
+}
+
 /// The Favorites page: a grid of cards for the cached top-teams list, followed by a
 /// rolling two-week match feed from the calendar. Selecting a team drills into that
 /// team's matches, most recent first.
 struct FavoritesView: View {
+    var mode: FavoritesMode = .combined
     @Environment(FootballiaService.self) private var service
     @State private var selectedTeam: Team? = nil
     @State private var selectedMatch: Match? = nil
@@ -60,11 +69,11 @@ struct FavoritesView: View {
         }
         .animation(.spring(response: 0.32, dampingFraction: 0.82), value: selectedTeam != nil)
         .task {
-            // First visit: both calls hit the network (homepage for team seeding + calendar year).
-            // Subsequent visits: loadFavoriteTeams reads disk, startCalendarList is a no-op.
+            let stale = service.isStale("favorites")
             async let fav: () = service.loadFavoriteTeams()
-            async let cal: () = service.startCalendarList()
+            async let cal: () = service.startCalendarList(force: stale)
             _ = await (fav, cal)
+            service.markLoaded("favorites")
         }
     }
 
@@ -75,12 +84,10 @@ struct FavoritesView: View {
             VStack(alignment: .leading, spacing: 0) {
                 // Header
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("Favorites")
+                    Text(mode == .recents ? "Recents" : "Favorites")
                         .font(.system(size: 26, weight: .bold))
                         .foregroundColor(.white)
-                    Text(service.favoriteTeams.isEmpty
-                         ? "Your teams will appear here"
-                         : "\(service.favoriteTeams.count) teams")
+                    Text(headerSubtitle)
                         .font(.subheadline)
                         .foregroundColor(.white.opacity(0.35))
                 }
@@ -88,46 +95,70 @@ struct FavoritesView: View {
                 .padding(.top, 30)
                 .padding(.bottom, 24)
 
-                // Team cards
-                if service.favoriteTeams.isEmpty {
-                    VStack(spacing: 10) {
-                        if FavoriteTeamsStore.hasCache {
-                            Text("No favorite teams")
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundColor(.white)
-                            Text("Add teams from Profile › Favorite Teams.")
-                                .font(.subheadline)
-                                .foregroundColor(.white.opacity(0.3))
-                        } else {
-                            ProgressView().tint(.green)
-                            Text("Loading teams…")
-                                .font(.subheadline)
-                                .foregroundColor(.white.opacity(0.3))
-                        }
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 160)
-                } else {
-                    let columns = [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 16)]
-                    LazyVGrid(columns: columns, spacing: 16) {
-                        ForEach(service.favoriteTeams) { team in
-                            TeamCardView(team: team) {
-                                selectedTeam = team
-                                service.loadMatchesLastPage(filter: .team(team.slug))
-                            }
-                        }
-                    }
-                    .padding(.horizontal, hPad)
+                if mode != .recents {
+                    teamCardsSection
                 }
 
-                // Calendar match feed
-                let sections = service.calendarListSections
-                if !sections.isEmpty || service.isLoadingMoreCalendar {
-                    calendarFeed(sections: sections)
+                if mode != .teams {
+                    let sections = service.calendarListSections
+                    if !sections.isEmpty || service.isLoadingMoreCalendar {
+                        calendarFeed(sections: sections)
+                    }
                 }
             }
             .padding(.bottom, 28)
         }
         .scrollIndicators(.hidden)
+    }
+
+    private var headerSubtitle: String {
+        switch mode {
+        case .recents:
+            return "Recent matches from your calendar"
+        case .teams, .combined:
+            return service.favoriteTeams.isEmpty
+                ? "Your teams will appear here"
+                : "\(service.favoriteTeams.count) teams"
+        }
+    }
+
+    @ViewBuilder
+    private var teamCardsSection: some View {
+        if service.favoriteTeams.isEmpty {
+            VStack(spacing: 10) {
+                if FavoriteTeamsStore.hasCache {
+                    Text("No favorite teams")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.white)
+                    Text("Add teams from Profile › Favorite Teams.")
+                        .font(.subheadline)
+                        .foregroundColor(.white.opacity(0.3))
+                } else {
+                    ProgressView().tint(.green)
+                    Text("Loading teams…")
+                        .font(.subheadline)
+                        .foregroundColor(.white.opacity(0.3))
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 160)
+        } else {
+            #if os(tvOS)
+            let columns = [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 16)]
+            #elseif os(iOS)
+            let columns = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
+            #else
+            let columns = [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)]
+            #endif
+            LazyVGrid(columns: columns, spacing: 16) {
+                ForEach(service.favoriteTeams) { team in
+                    TeamCardView(team: team) {
+                        selectedTeam = team
+                        service.loadMatchesLastPage(filter: .team(team.slug))
+                    }
+                }
+            }
+            .padding(.horizontal, hPad)
+        }
     }
 
     // MARK: - Calendar feed
@@ -141,18 +172,15 @@ struct FavoritesView: View {
                 .padding(.horizontal, hPad)
                 .padding(.top, 32)
 
-            HStack {
-                Text("Recent Matches")
-                    .font(.system(size: 20, weight: .bold))
-                    .foregroundColor(.white)
-                Spacer()
-                if service.isLoadingMoreCalendar {
+            if service.isLoadingMoreCalendar {
+                HStack {
+                    Spacer()
                     ProgressView().tint(.green).controlSize(.small)
                 }
+                .padding(.horizontal, hPad)
+                .padding(.top, 20)
+                .padding(.bottom, 16)
             }
-            .padding(.horizontal, hPad)
-            .padding(.top, 20)
-            .padding(.bottom, 16)
 
             // Date section rows
             ForEach(sections) { section in
@@ -377,7 +405,7 @@ struct TeamCardView: View {
             VStack(spacing: 12) {
                 Group {
                     if let logoURL = team.logoURL {
-                        AsyncImage(url: logoURL) { phase in
+                        CachedAsyncImage(url: logoURL) { phase in
                             switch phase {
                             case .success(let image):
                                 image.resizable().aspectRatio(contentMode: .fit)

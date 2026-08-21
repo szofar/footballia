@@ -33,23 +33,9 @@ struct VideoCardView: View {
 
     private var thumbnailArea: some View {
         ZStack {
-            Color(red: 0.1, green: 0.1, blue: 0.13)
-
-            if let url = match.thumbnailURL {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().aspectRatio(contentMode: .fill)
-                    case .failure:
-                        placeholder
-                    case .empty:
-                        ProgressView().tint(.green).controlSize(.small)
-                    @unknown default:
-                        placeholder
-                    }
-                }
-            } else {
-                placeholder
+            HStack(spacing: 1) {
+                teamHalf(name: match.homeTeam, logoURL: match.homeTeamLogoURL)
+                teamHalf(name: match.awayTeam, logoURL: match.awayTeamLogoURL)
             }
 
             if isHighlighted {
@@ -67,6 +53,33 @@ struct VideoCardView: View {
         }
         .aspectRatio(16 / 9, contentMode: .fill)
         .clipped()
+    }
+
+    private func teamHalf(name: String, logoURL: URL?) -> some View {
+        ZStack {
+            Color(red: 0.1, green: 0.1, blue: 0.13)
+            Group {
+                if let url = logoURL {
+                    CachedAsyncImage(url: url) { phase in
+                        if case .success(let image) = phase {
+                            image.resizable().aspectRatio(contentMode: .fit)
+                        } else {
+                            teamInitials(name: name)
+                        }
+                    }
+                } else {
+                    teamInitials(name: name)
+                }
+            }
+            .frame(width: 52, height: 52)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func teamInitials(name: String) -> some View {
+        Text(String(name.prefix(2)).uppercased())
+            .font(.system(size: 20, weight: .bold))
+            .foregroundColor(.white.opacity(0.25))
     }
 
     private var infoArea: some View {
@@ -134,7 +147,7 @@ struct VideoCardView: View {
     @ViewBuilder
     private func teamFlag(url: URL?) -> some View {
         if let url {
-            AsyncImage(url: url) { phase in
+            CachedAsyncImage(url: url) { phase in
                 if case .success(let img) = phase {
                     img.resizable().aspectRatio(contentMode: .fit)
                 } else {
@@ -145,9 +158,4 @@ struct VideoCardView: View {
         }
     }
 
-    private var placeholder: some View {
-        Image(systemName: "sportscourt")
-            .font(.system(size: 26))
-            .foregroundColor(.white.opacity(0.12))
-    }
 }

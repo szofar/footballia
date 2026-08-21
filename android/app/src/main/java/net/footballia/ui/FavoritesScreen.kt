@@ -37,13 +37,27 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 
 /**
+ * Which sections the Favorites page shows. TEAMS and RECENTS are split into separate
+ * root tabs; COMBINED shows both on one page. Mirrors FavoritesMode in FavoritesView.swift.
+ */
+enum class FavoritesMode { COMBINED, TEAMS, RECENTS }
+
+/**
  * The Favorites page: a grid of team cards followed by a rolling two-week match feed.
  * Mirrors FavoritesView.swift.
  */
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
-fun FavoritesScreen(viewModel: FootballiaViewModel, onMatchSelect: (Match) -> Unit) {
-    LaunchedEffect(Unit) { viewModel.startCalendarList() }
+fun FavoritesScreen(
+    viewModel: FootballiaViewModel,
+    mode: FavoritesMode = FavoritesMode.COMBINED,
+    onMatchSelect: (Match) -> Unit
+) {
+    LaunchedEffect(Unit) {
+        val stale = viewModel.isStale("favorites")
+        viewModel.startCalendarList(force = stale)
+        viewModel.markLoaded("favorites")
+    }
 
     var selectedTeam by remember { mutableStateOf<Team?>(null) }
 
@@ -101,10 +115,16 @@ fun FavoritesScreen(viewModel: FootballiaViewModel, onMatchSelect: (Match) -> Un
                 modifier = Modifier.padding(start = 28.dp, end = 28.dp, top = 30.dp, bottom = 24.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                Text("Favorites", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
                 Text(
-                    if (viewModel.favoriteTeams.isEmpty()) "Your teams will appear here"
-                    else "${viewModel.favoriteTeams.size} teams",
+                    if (mode == FavoritesMode.RECENTS) "Recents" else "Favorites",
+                    color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold
+                )
+                Text(
+                    when {
+                        mode == FavoritesMode.RECENTS -> "Recent matches from your calendar"
+                        viewModel.favoriteTeams.isEmpty() -> "Your teams will appear here"
+                        else -> "${viewModel.favoriteTeams.size} teams"
+                    },
                     color = Color.White.copy(alpha = 0.35f),
                     fontSize = 13.sp
                 )
@@ -112,55 +132,57 @@ fun FavoritesScreen(viewModel: FootballiaViewModel, onMatchSelect: (Match) -> Un
         }
 
         // Team cards — rendered in chunked rows so the LazyColumn owns all scrolling
-        if (viewModel.favoriteTeams.isEmpty()) {
-            item(key = "empty_teams") {
-                Box(
-                    modifier = Modifier.fillMaxWidth().height(160.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
+        if (mode != FavoritesMode.RECENTS) {
+            if (viewModel.favoriteTeams.isEmpty()) {
+                item(key = "empty_teams") {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().height(160.dp),
+                        contentAlignment = Alignment.Center
                     ) {
-                        if (viewModel.favoritesLoaded) {
-                            Text("No favorite teams", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                            Text("Add teams from Profile › Favorite Teams.", color = Color.White.copy(alpha = 0.3f), fontSize = 13.sp)
-                        } else {
-                            CircularProgressIndicator(color = Color(0xFF22C55E))
-                            Text("Loading teams…", color = Color.White.copy(alpha = 0.3f), fontSize = 13.sp)
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            if (viewModel.favoritesLoaded) {
+                                Text("No favorite teams", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                                Text("Add teams from Profile › Favorite Teams.", color = Color.White.copy(alpha = 0.3f), fontSize = 13.sp)
+                            } else {
+                                CircularProgressIndicator(color = Color(0xFF22C55E))
+                                Text("Loading teams…", color = Color.White.copy(alpha = 0.3f), fontSize = 13.sp)
+                            }
                         }
                     }
                 }
-            }
-        } else {
-            val teams = viewModel.favoriteTeams
-            // 4 columns; remainder row gets spacer-filled gaps
-            val cols = 4
-            teams.chunked(cols).forEachIndexed { rowIdx, row ->
-                item(key = "team_row_$rowIdx") {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 28.dp)
-                            .padding(bottom = 12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        row.forEach { t ->
-                            Box(modifier = Modifier.weight(1f)) {
-                                FavoriteTeamCard(team = t) {
-                                    selectedTeam = t
-                                    viewModel.loadMatchesLastPage(MatchFilter.ByTeam(t.slug))
+            } else {
+                val teams = viewModel.favoriteTeams
+                // 3 columns; remainder row gets spacer-filled gaps
+                val cols = 3
+                teams.chunked(cols).forEachIndexed { rowIdx, row ->
+                    item(key = "team_row_$rowIdx") {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 28.dp)
+                                .padding(bottom = 12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            row.forEach { t ->
+                                Box(modifier = Modifier.weight(1f)) {
+                                    FavoriteTeamCard(team = t) {
+                                        selectedTeam = t
+                                        viewModel.loadMatchesLastPage(MatchFilter.ByTeam(t.slug))
+                                    }
                                 }
                             }
+                            repeat(cols - row.size) { Spacer(Modifier.weight(1f)) }
                         }
-                        repeat(cols - row.size) { Spacer(Modifier.weight(1f)) }
                     }
                 }
             }
         }
 
         // Calendar match feed
-        if (showCalendar) {
+        if (mode != FavoritesMode.TEAMS && showCalendar) {
             // Divider + section header
             item(key = "cal_header") {
                 Column {
@@ -172,16 +194,15 @@ fun FavoritesScreen(viewModel: FootballiaViewModel, onMatchSelect: (Match) -> Un
                             .height(1.dp)
                             .background(Color.White.copy(alpha = 0.06f))
                     )
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 28.dp)
-                            .padding(top = 20.dp, bottom = 16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Recent Matches", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                        if (viewModel.isLoadingMoreCalendar) {
+                    if (viewModel.isLoadingMoreCalendar) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 28.dp)
+                                .padding(top = 20.dp, bottom = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.End
+                        ) {
                             CircularProgressIndicator(modifier = Modifier.size(18.dp), color = Color(0xFF22C55E), strokeWidth = 2.dp)
                         }
                     }

@@ -12,6 +12,9 @@ struct MainView: View {
             #if os(tvOS)
             tvShell
                 .allowsHitTesting(selectedMatch == nil)
+            #elseif os(iOS)
+            mobileShell
+                .allowsHitTesting(selectedMatch == nil)
             #else
             appShell
                 .allowsHitTesting(selectedMatch == nil)
@@ -42,6 +45,26 @@ struct MainView: View {
             }
         }
     }
+    #elseif os(iOS)
+    // On mobile the navigation lives in a top bar instead of a left sidebar. The app logo is
+    // shown only in landscape (portrait is too narrow to spare the width); in either orientation
+    // the menu itself sits along the top.
+    private var mobileShell: some View {
+        GeometryReader { geo in
+            let isLandscape = geo.size.width > geo.size.height
+            VStack(spacing: 0) {
+                TopMenuBar(sections: sections, selected: $selectedSection, showLogo: isLandscape)
+                    .background(Color(red: 0.06, green: 0.06, blue: 0.08))
+
+                Rectangle()
+                    .fill(Color.white.opacity(0.06))
+                    .frame(height: 1)
+
+                content(for: selectedSection)
+                    .background(Color(red: 0.08, green: 0.08, blue: 0.10))
+            }
+        }
+    }
     #else
     private var appShell: some View {
         HStack(spacing: 0) {
@@ -62,7 +85,13 @@ struct MainView: View {
     @ViewBuilder
     private func content(for section: SidebarSection) -> some View {
         switch section {
-        case .favorites:    FavoritesView()
+        #if os(iOS)
+        case .favorites:    FavoritesView(mode: .teams)
+        case .recents:      FavoritesView(mode: .recents)
+        #else
+        case .favorites:    FavoritesView(mode: .combined)
+        case .recents:      FavoritesView(mode: .combined)
+        #endif
         case .competitions: CompetitionsView()
         case .search:       SearchView()
         case .calendar:     CalendarView()

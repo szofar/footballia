@@ -11,6 +11,11 @@ import android.util.Log
 import net.footballia.R
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -47,6 +52,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
@@ -55,6 +61,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import net.footballia.data.Match
+import org.json.JSONArray
 import androidx.tv.material3.IconButton as TvIconButton
 
 private const val STREAM_TIMEOUT_MS = 25_000L
@@ -68,12 +75,26 @@ private const val HOLD_TICK_MS = 220L
 private const val HOLD_MAX_STEP_MS = 60_000L
 private val ACCENT_GREEN = Color(0xFF22C55E)
 
+private fun parseStreamUrls(received: String): List<String> {
+    return if (received.trimStart().startsWith("[")) {
+        try {
+            val arr = JSONArray(received)
+            (0 until arr.length()).map { arr.getString(it) }
+        } catch (e: Exception) { emptyList() }
+    } else {
+        listOf(received)
+    }
+}
+
+private fun halfLabel(index: Int, total: Int): String =
+    if (total == 2) if (index == 0) "1st Half" else "2nd Half" else "Part ${index + 1}"
+
 @OptIn(UnstableApi::class)
 @Composable
 fun VideoPlayerScreen(match: Match, onClose: () -> Unit) {
     val context = LocalContext.current
     val streamChannel = remember { Channel<String>(Channel.CONFLATED) }
-    var streamUrl by remember { mutableStateOf<String?>(null) }
+    var streamUrls by remember { mutableStateOf<List<String>?>(null) }
     var isLoading by remember { mutableStateOf(true) }
     var loadFailed by remember { mutableStateOf(false) }
 
@@ -82,38 +103,47 @@ fun VideoPlayerScreen(match: Match, onClose: () -> Unit) {
     var isPlaying by remember { mutableStateOf(true) }
     var positionMs by remember { mutableStateOf(0L) }
     var durationMs by remember { mutableStateOf(0L) }
+    var currentHalfIndex by remember { mutableStateOf(0) }
+    var halfBanner by remember { mutableStateOf<String?>(null) }
 
     fun onInteraction() {
         controlsVisible = true
         interactionTick++
     }
 
-    // Remote's back button exits the video instead of navigating within it.
     BackHandler(onBack = onClose)
 
-    // Keep the display awake for the whole session. The TV otherwise dims and sleeps on its
-    // inactivity timer: ExoPlayer alone doesn't hold a wake lock, and nothing here counts as
-    // user input during playback. Driven off the composition's own View so it holds regardless
-    // of how the Compose context is wrapped, and released as soon as the player goes away.
     val view = LocalView.current
     DisposableEffect(view) {
         view.keepScreenOn = true
         onDispose { view.keepScreenOn = false }
     }
 
-    // Receive stream URL from JS bridge on the main coroutine. Give up after a
-    // timeout instead of spinning forever if the page never yields a stream.
+    // Receive all stream URLs from the JS bridge.
     LaunchedEffect(Unit) {
-        val url = withTimeoutOrNull(STREAM_TIMEOUT_MS) { streamChannel.receive() }
-        if (url != null) streamUrl = url else loadFailed = true
+        val received = withTimeoutOrNull(STREAM_TIMEOUT_MS) { streamChannel.receive() }
+        if (received != null) {
+            val urls = parseStreamUrls(received).filter { it.isNotEmpty() }
+            if (urls.isNotEmpty()) streamUrls = urls else loadFailed = true
+        } else {
+            loadFailed = true
+        }
         isLoading = false
     }
 
-    // Controls auto-hide after a period of inactivity; any interaction resets it.
+    // Controls auto-hide after a period of inactivity.
     LaunchedEffect(controlsVisible, interactionTick) {
         if (controlsVisible) {
             delay(CONTROLS_HIDE_DELAY_MS)
             controlsVisible = false
+        }
+    }
+
+    // Auto-hide half banner after 3.5 s.
+    LaunchedEffect(halfBanner) {
+        if (halfBanner != null) {
+            delay(3_500)
+            halfBanner = null
         }
     }
 
@@ -127,8 +157,8 @@ fun VideoPlayerScreen(match: Match, onClose: () -> Unit) {
             }
     ) {
 
-        // Hidden WebView loads the match page and extracts the HLS stream URL via JS
-        if (streamUrl == null) {
+        // Hidden WebView extracts all HLS stream URLs via JS.
+        if (streamUrls == null) {
             AndroidView(
                 factory = { ctx ->
                     WebView.setWebContentsDebuggingEnabled(true)
@@ -136,17 +166,15 @@ fun VideoPlayerScreen(match: Match, onClose: () -> Unit) {
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
                         settings.mediaPlaybackRequiresUserGesture = false
-                        // Match desktop UA used elsewhere so footballia.eu serves the
-                        // desktop layout with #jwplayer, not a mobile page without it.
                         settings.userAgentString =
                             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
 
                         addJavascriptInterface(
                             object {
                                 @JavascriptInterface
-                                fun streamFound(url: String) {
-                                    if (!url.startsWith("blob:") && url.isNotEmpty()) {
-                                        streamChannel.trySend(url)
+                                fun streamFound(payload: String) {
+                                    if (payload.isNotEmpty()) {
+                                        streamChannel.trySend(payload)
                                     }
                                 }
                             },
@@ -179,22 +207,35 @@ fun VideoPlayerScreen(match: Match, onClose: () -> Unit) {
             )
         }
 
-        // ExoPlayer once the HLS stream URL is resolved
-        streamUrl?.let { url ->
-            val player = remember(url) {
+        // ExoPlayer once the stream URLs are resolved. All parts are queued; ExoPlayer
+        // auto-advances to the next when each one ends.
+        streamUrls?.let { urls ->
+            val player = remember(urls) {
                 ExoPlayer.Builder(context).build().apply {
-                    setMediaItem(MediaItem.fromUri(url))
+                    setMediaItems(urls.map { MediaItem.fromUri(it) })
                     prepare()
                     playWhenReady = true
                 }
             }
 
             DisposableEffect(player) {
-                onDispose { player.release() }
+                // Listen for automatic half transitions to show the banner.
+                val listener = object : Player.Listener {
+                    override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                        val idx = player.currentMediaItemIndex
+                        currentHalfIndex = idx
+                        if (urls.size > 1 && reason != Player.MEDIA_ITEM_TRANSITION_REASON_SEEK) {
+                            halfBanner = "Now Playing: ${halfLabel(idx, urls.size)}"
+                        }
+                    }
+                }
+                player.addListener(listener)
+                onDispose {
+                    player.removeListener(listener)
+                    player.release()
+                }
             }
 
-            // PlayerView's built-in controller is disabled (see video_player_view.xml);
-            // this polls playback state for the custom Compose controls below instead.
             LaunchedEffect(player) {
                 while (true) {
                     isPlaying = player.isPlaying
@@ -204,18 +245,13 @@ fun VideoPlayerScreen(match: Match, onClose: () -> Unit) {
                 }
             }
 
-            LaunchedEffect(url) { onInteraction() }
+            LaunchedEffect(urls) { onInteraction() }
 
             AndroidView(
                 factory = { ctx ->
-                    // Inflated from XML so the PlayerView uses a TextureView surface
-                    // (see res/layout/video_player_view.xml) — a SurfaceView would
-                    // render behind the Compose overlay and show only black.
                     val view = LayoutInflater.from(ctx)
                         .inflate(R.layout.video_player_view, null) as PlayerView
                     view.player = player
-                    // Controls are the custom Compose overlay below; don't let this
-                    // view steal D-pad focus from it.
                     view.isFocusable = false
                     view
                 },
@@ -228,6 +264,8 @@ fun VideoPlayerScreen(match: Match, onClose: () -> Unit) {
                 isPlaying = isPlaying,
                 positionMs = positionMs,
                 durationMs = durationMs,
+                halfCount = urls.size,
+                currentHalfIndex = currentHalfIndex,
                 onPlayPause = {
                     onInteraction()
                     if (player.isPlaying) player.pause() else player.play()
@@ -237,6 +275,14 @@ fun VideoPlayerScreen(match: Match, onClose: () -> Unit) {
                     val target = (player.currentPosition + deltaMs)
                         .coerceIn(0, player.duration.coerceAtLeast(0))
                     player.seekTo(target)
+                },
+                onSwitchHalf = { idx ->
+                    onInteraction()
+                    if (idx != currentHalfIndex) {
+                        player.seekToDefaultPosition(idx)
+                        currentHalfIndex = idx
+                        halfBanner = "Now Playing: ${halfLabel(idx, urls.size)}"
+                    }
                 },
                 modifier = Modifier.align(Alignment.BottomCenter)
             )
@@ -263,8 +309,7 @@ fun VideoPlayerScreen(match: Match, onClose: () -> Unit) {
             }
         }
 
-        // Top bar: shown while loading/failed (so the user can always go back),
-        // and otherwise only while the playback controls overlay is visible.
+        // Top bar
         if (isLoading || loadFailed || controlsVisible) {
             Row(
                 modifier = Modifier
@@ -288,15 +333,33 @@ fun VideoPlayerScreen(match: Match, onClose: () -> Unit) {
                 }
             }
         }
+
+        // Half-switch banner — shown briefly on auto-advance or manual switch.
+        AnimatedVisibility(
+            visible = halfBanner != null,
+            modifier = Modifier.align(Alignment.TopCenter).padding(top = 80.dp),
+            enter = fadeIn() + slideInVertically { -it },
+            exit = fadeOut() + slideOutVertically { -it }
+        ) {
+            halfBanner?.let { msg ->
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(ACCENT_GREEN.copy(alpha = 0.92f))
+                        .padding(horizontal = 20.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = null,
+                        tint = Color.White, modifier = Modifier.size(14.dp))
+                    Text(msg, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
     }
 }
 
 // MARK: - Custom playback controls
-//
-// PlayerView's built-in controller doesn't support footballia's TV seek
-// conventions, so this is hand-rolled: the skip buttons jump a fixed ±10s on
-// a tap, but scrub with progressively larger jumps if held; the timeline
-// itself moves in 30s steps via D-pad left/right once it's focused.
 
 @Composable
 private fun VideoControls(
@@ -304,8 +367,11 @@ private fun VideoControls(
     isPlaying: Boolean,
     positionMs: Long,
     durationMs: Long,
+    halfCount: Int,
+    currentHalfIndex: Int,
     onPlayPause: () -> Unit,
     onSeekBy: (Long) -> Unit,
+    onSwitchHalf: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val playPauseFocusRequester = remember { FocusRequester() }
@@ -333,6 +399,32 @@ private fun VideoControls(
             .padding(horizontal = 28.dp, vertical = 18.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        // Half-switch buttons — only visible when match has multiple parts.
+        if (halfCount > 1) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                for (idx in 0 until halfCount) {
+                    val isSelected = idx == currentHalfIndex
+                    val label = halfLabel(idx, halfCount)
+                    TvIconButton(
+                        onClick = { onSwitchHalf(idx) },
+                        colors = IconButtonDefaults.colors(
+                            containerColor = if (isSelected) ACCENT_GREEN else Color.White.copy(alpha = 0.12f),
+                            contentColor = if (isSelected) Color.Black else Color.White,
+                            focusedContainerColor = if (isSelected) ACCENT_GREEN else Color.White.copy(alpha = 0.28f),
+                            focusedContentColor = if (isSelected) Color.Black else Color.White
+                        ),
+                        modifier = Modifier.padding(horizontal = 6.dp)
+                    ) {
+                        Text(label, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+        }
+
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.Center,
@@ -372,9 +464,6 @@ private fun VideoControls(
     }
 }
 
-// Single click seeks by SKIP_MS once. Holding past HOLD_ENGAGE_DELAY_MS starts
-// a repeating seek whose step grows each tick, so a long hold scrubs faster
-// the longer it's held.
 @Composable
 private fun SkipButton(
     direction: Int,
@@ -455,10 +544,6 @@ private fun SeekBar(
     }
 }
 
-// D-pad key-repeat events carry the original downTime alongside each repeat's
-// eventTime, so the true hold duration is derived from the native event rather
-// than tracked by hand. Step size ramps linearly from SEEK_BAR_MIN_STEP_MS at
-// press to SEEK_BAR_MAX_STEP_MS once held past SEEK_BAR_RAMP_MS.
 private fun seekBarHoldStepMs(event: androidx.compose.ui.input.key.KeyEvent): Long {
     val heldMs = (event.nativeKeyEvent.eventTime - event.nativeKeyEvent.downTime).coerceAtLeast(0)
     val fraction = (heldMs.toFloat() / SEEK_BAR_RAMP_MS).coerceIn(0f, 1f)
@@ -474,8 +559,7 @@ private fun formatPlaybackTime(ms: Long): String {
     return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
 }
 
-// JS adapted from VideoPlayerView.swift — replaces window.webkit.messageHandlers
-// with window.Android so the same JWPlayer extraction works on Android WebView.
+// JS adapted from VideoPlayerView.swift — extracts ALL playlist parts and reports as JSON array.
 
 private val JS_HIDE_CHROME = """
 (function() {
@@ -507,27 +591,29 @@ private val JS_AUTO_PLAY = """
     var reported = false;
     var fallbackTimer = null;
 
-    function report(url) {
-        if (reported || !url) return true;
+    function report(urls) {
+        if (reported || !urls || !urls.length) return;
         reported = true;
         if (fallbackTimer) clearTimeout(fallbackTimer);
-        window.Android.streamFound(url);
-        return true;
+        window.Android.streamFound(JSON.stringify(urls));
     }
 
-    // Decode the stream straight out of the page's own "var playlist = [...]"
-    // block. The site stores each file as base64 and decodes it via
-    // new Video(file).url(). This path does not need JWPlayer to be alive.
     function extractFromPlaylist() {
         if (reported) return false;
         try {
             var m = document.documentElement.innerHTML.match(/var playlist = (\[[\s\S]*?\]);/);
             if (!m) return false;
             var items = JSON.parse(m[1]);
-            if (!items || !items.length || !items[0].file) return false;
-            var url = window.atob(String(items[0].file).replace(/\s/g, ''));
-            if (!url || url.indexOf('http') !== 0) return false;
-            return report(url);
+            if (!items || !items.length) return false;
+            var urls = [];
+            for (var i = 0; i < items.length; i++) {
+                if (!items[i].file) continue;
+                var url = window.atob(String(items[i].file).replace(/\s/g, ''));
+                if (url && url.indexOf('http') === 0) urls.push(url);
+            }
+            if (!urls.length) return false;
+            report(urls);
+            return true;
         } catch(e) { return false; }
     }
 
@@ -535,7 +621,7 @@ private val JS_AUTO_PLAY = """
         if (reported) return;
         try {
             var item = p.getPlaylistItem();
-            if (item && item.file) { report(item.file); return; }
+            if (item && item.file) { report([item.file]); return; }
         } catch(e) {}
         extractFromPlaylist();
     }
@@ -553,7 +639,6 @@ private val JS_AUTO_PLAY = """
         if (typeof jwplayer === 'undefined') return false;
         var p = jwplayer('jwplayer');
         if (!p || typeof p.getState !== 'function') return false;
-        // Extract first: a failure inside resize() must never block playback.
         extractURL(p);
         resizePlayer(p);
         return true;
@@ -575,11 +660,11 @@ private val JS_AUTO_PLAY = """
 
     var tries = 0;
     if (!extractFromPlaylist()) {
-    var poll = setInterval(function() {
-        tries++;
-        if (tries > 40) { clearInterval(poll); return; }
-        if (tryStart() && reported) clearInterval(poll);
-    }, 250);
+        var poll = setInterval(function() {
+            tries++;
+            if (tries > 40) { clearInterval(poll); return; }
+            if (tryStart() && reported) clearInterval(poll);
+        }, 250);
     }
 })();
 """.trimIndent()

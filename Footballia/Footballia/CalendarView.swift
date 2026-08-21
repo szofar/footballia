@@ -31,7 +31,11 @@ struct CalendarView: View {
                 .zIndex(10)
             }
         }
-        .task { await service.startCalendar() }
+        .task {
+            let stale = service.isStale("calendar")
+            await service.startCalendar(force: stale)
+            service.markLoaded("calendar")
+        }
     }
 
     // MARK: - Master gate
@@ -93,20 +97,20 @@ struct CalendarView: View {
     // MARK: - Header
 
     private var calendarHeader: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Calendar")
-                    .font(.system(size: 26, weight: .bold))
-                    .foregroundColor(.white)
-                Text("Browse matches by date")
-                    .font(.subheadline)
-                    .foregroundColor(.white.opacity(0.35))
-            }
-
-            Spacer()
-
-            if service.isLoadingCalendar {
-                ProgressView().tint(.green).controlSize(.small)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Calendar")
+                        .font(.system(size: 26, weight: .bold))
+                        .foregroundColor(.white)
+                    Text("Browse matches by date")
+                        .font(.subheadline)
+                        .foregroundColor(.white.opacity(0.35))
+                }
+                Spacer()
+                if service.isLoadingCalendar {
+                    ProgressView().tint(.green).controlSize(.small)
+                }
             }
 
             HStack(spacing: 20) {

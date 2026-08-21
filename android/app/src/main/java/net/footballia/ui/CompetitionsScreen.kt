@@ -33,7 +33,11 @@ import net.footballia.viewmodel.FootballiaViewModel
 fun CompetitionsScreen(viewModel: FootballiaViewModel, onMatchSelect: (Match) -> Unit) {
     var selectedCompetition by remember { mutableStateOf<Competition?>(null) }
 
-    LaunchedEffect(Unit) { viewModel.loadCompetitions() }
+    LaunchedEffect(Unit) {
+        val stale = viewModel.isStale("competitions")
+        viewModel.loadCompetitions(force = stale)
+        viewModel.markLoaded("competitions")
+    }
 
     if (selectedCompetition != null) {
         val comp = selectedCompetition!!

@@ -117,6 +117,19 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
     var searchPaginationReversed by mutableStateOf(true); private set
     var activeSuggestion by mutableStateOf<SearchSuggestion?>(null); private set
 
+    // Tab cache: tracks when each section was last loaded (millis). Sections skip re-fetching
+    // if visited within 30 seconds; after that the next visit triggers a fresh request.
+    private val sectionLoadTimes = mutableMapOf<String, Long>()
+
+    fun isStale(key: String): Boolean {
+        val last = sectionLoadTimes[key] ?: return true
+        return System.currentTimeMillis() - last > 30_000
+    }
+
+    fun markLoaded(key: String) {
+        sectionLoadTimes[key] = System.currentTimeMillis()
+    }
+
     // Calendar — backed by a per-year event feed (one fetch per year, then cached).
     private val calendarCache = mutableMapOf<Int, Map<String, List<Match>>>()
 
@@ -173,6 +186,7 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
         currentPage = 1; hasNextPage = false; paginationReversed = false
         currentFilter = MatchFilter.All; activeSuggestion = null
         favoritesLoaded = false
+        sectionLoadTimes.clear()
         favoriteSearchJob?.cancel()
         favoriteTeamSearchResults = emptyList(); favoriteTeamSearchError = null
         isSearchingFavoriteTeams = false; pendingFavoriteSlugs = emptySet()
@@ -339,8 +353,8 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    fun loadCompetitions() {
-        if (competitionCategories.isNotEmpty()) return
+    fun loadCompetitions(force: Boolean = false) {
+        if (!force && competitionCategories.isNotEmpty()) return
         viewModelScope.launch {
             isLoadingCompetitions = true
             runCatching { competitionCategories = repo.loadCompetitions() }
@@ -405,8 +419,8 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
 
     // MARK: - Calendar month-grid (CalendarScreen)
 
-    fun startCalendar() {
-        if (calendarStarted) return
+    fun startCalendar(force: Boolean = false) {
+        if (!force && calendarStarted) return
         calendarStarted = true
         viewModelScope.launch {
             isLoadingCalendar = true
@@ -464,8 +478,8 @@ class FootballiaViewModel(application: Application) : AndroidViewModel(applicati
     // MARK: - Calendar list (FavoritesScreen)
 
     /** First-visit entry point. Loads the most-recent 14-day window; no-op on revisits. */
-    fun startCalendarList() {
-        if (calendarListLoaded) return
+    fun startCalendarList(force: Boolean = false) {
+        if (!force && calendarListLoaded) return
         calendarListLoaded = true
         // Start 30 days back so the feed only ever shows matches old enough to be available.
         calendarListNextFetchEndMs = Calendar.getInstance()

@@ -31,25 +31,34 @@ import java.util.Locale
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 fun CalendarScreen(viewModel: FootballiaViewModel, onMatchSelect: (Match) -> Unit) {
-    LaunchedEffect(Unit) { viewModel.startCalendar() }
+    LaunchedEffect(Unit) {
+        val stale = viewModel.isStale("calendar")
+        viewModel.startCalendar(force = stale)
+        viewModel.markLoaded("calendar")
+    }
     val selectedDay = viewModel.calendarSelectedDay
 
     Column(modifier = Modifier.fillMaxSize()) {
         // Header
-        Row(
+        Column(
             modifier = Modifier.fillMaxWidth().background(Color(0xFF111116)).padding(horizontal = 28.dp, vertical = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Column {
-                Text("Calendar", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                Text("Browse matches by date", color = Color.White.copy(alpha = 0.35f), fontSize = 13.sp)
-            }
-
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column {
+                    Text("Calendar", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                    Text("Browse matches by date", color = Color.White.copy(alpha = 0.35f), fontSize = 13.sp)
+                }
                 if (viewModel.isLoadingCalendar) {
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), color = Color(0xFF22C55E), strokeWidth = 2.dp)
                 }
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 IconButton(onClick = { stepMonth(viewModel, -1) }) {
                     Icon(Icons.Default.ChevronLeft, null, tint = Color.White.copy(alpha = 0.6f))
                 }

@@ -4,6 +4,7 @@ import Foundation
 
 enum SidebarSection: String, CaseIterable, Identifiable {
     case favorites    = "Favorites"
+    case recents      = "Recents"
     case competitions = "Competitions"
     case search       = "Search"
     case calendar     = "Calendar"
@@ -14,6 +15,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .favorites:    return "star.fill"
+        case .recents:      return "clock.fill"
         case .competitions: return "trophy.fill"
         case .search:       return "magnifyingglass"
         case .calendar:     return "calendar"
@@ -24,7 +26,17 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     /// Fixed navigation order. Calendar is Master-gated, but the order deliberately does not
     /// depend on entitlement: reordering once the check came back made the tabs jump under the
     /// user's cursor a moment after launch.
-    static let ordered: [SidebarSection] = [.favorites, .competitions, .calendar, .search, .profile]
+    ///
+    /// On mobile the Favorites page's team grid and recent-matches feed are split into two
+    /// separate root tabs (`.favorites` / `.recents`); on tvOS/macOS both live on the one
+    /// Favorites page, so `.recents` is omitted there.
+    static let ordered: [SidebarSection] = {
+        #if os(iOS)
+        return [.favorites, .recents, .competitions, .calendar, .search, .profile]
+        #else
+        return [.favorites, .competitions, .calendar, .search, .profile]
+        #endif
+    }()
 }
 
 // MARK: - Match filter

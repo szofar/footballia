@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.EmojiEvents
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
@@ -12,6 +13,7 @@ import androidx.compose.material.icons.filled.Star
 import androidx.compose.runtime.*
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -25,13 +27,14 @@ import net.footballia.viewmodel.FootballiaViewModel
 private enum class NavSection(val label: String, val icon: ImageVector) {
     CALENDAR("Calendar", Icons.Default.CalendarMonth),
     FAVORITES("Favorites", Icons.Default.Star),
+    RECENTS("Recents", Icons.Default.History),
     COMPETITIONS("Competitions", Icons.Default.EmojiEvents),
     SEARCH("Search", Icons.Default.Search),
     PROFILE("Profile", Icons.Default.Person)
 }
 
 private val fixedNavOrder = listOf(
-    NavSection.FAVORITES, NavSection.COMPETITIONS, NavSection.CALENDAR, NavSection.SEARCH, NavSection.PROFILE
+    NavSection.FAVORITES, NavSection.RECENTS, NavSection.COMPETITIONS, NavSection.CALENDAR, NavSection.SEARCH, NavSection.PROFILE
 )
 
 @OptIn(ExperimentalTvMaterial3Api::class, ExperimentalComposeUiApi::class)
@@ -52,16 +55,29 @@ fun MainScreen(viewModel: FootballiaViewModel) {
             VideoPlayerScreen(match = match, onClose = { selectedMatch = null })
         } else {
             Column(modifier = Modifier.fillMaxSize()) {
-                // Top tab row
+                // Top menu bar: app logo on the left, then the tab row. Android TV is
+                // landscape-locked, so (matching the landscape rule) the logo is always shown.
                 val selectedIndex = sections.indexOf(selectedSection)
-                TabRow(
-                    selectedTabIndex = selectedIndex,
-                    // Without focusRestorer, any stray focus loss (e.g. when a screen swaps its
-                    // content for a drill-down) falls back to the *first* tab, whose onFocus
-                    // would then yank the user onto that tab. Restoring focus to the previously
-                    // focused tab keeps the current section selected.
-                    modifier = Modifier.fillMaxWidth().focusRestorer(),
-                    indicator = { tabPositions, doesTabRowHaveFocus ->
+                Row(
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth().background(Color(0xFF111116))
+                ) {
+                    androidx.compose.foundation.Image(
+                        painter = androidx.compose.ui.res.painterResource(id = net.footballia.R.mipmap.ic_launcher),
+                        contentDescription = null,
+                        modifier = Modifier
+                            .padding(start = 20.dp, end = 4.dp)
+                            .size(32.dp)
+                            .clip(androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                    )
+                    TabRow(
+                        selectedTabIndex = selectedIndex,
+                        // Without focusRestorer, any stray focus loss (e.g. when a screen swaps its
+                        // content for a drill-down) falls back to the *first* tab, whose onFocus
+                        // would then yank the user onto that tab. Restoring focus to the previously
+                        // focused tab keeps the current section selected.
+                        modifier = Modifier.weight(1f).focusRestorer(),
+                        indicator = { tabPositions, doesTabRowHaveFocus ->
                         tabPositions.getOrNull(selectedIndex)?.let { tabPosition ->
                             TabRowDefaults.PillIndicator(
                                 currentTabPosition = tabPosition,
@@ -96,6 +112,7 @@ fun MainScreen(viewModel: FootballiaViewModel) {
                             }
                         }
                     }
+                    }
                 }
 
                 // Content
@@ -104,7 +121,8 @@ fun MainScreen(viewModel: FootballiaViewModel) {
                         NavSection.CALENDAR ->
                             if (hasMasterAccess) CalendarScreen(viewModel) { selectedMatch = it }
                             else CalendarLockedView()
-                        NavSection.FAVORITES     -> FavoritesScreen(viewModel) { selectedMatch = it }
+                        NavSection.FAVORITES     -> FavoritesScreen(viewModel, FavoritesMode.TEAMS) { selectedMatch = it }
+                        NavSection.RECENTS       -> FavoritesScreen(viewModel, FavoritesMode.RECENTS) { selectedMatch = it }
                         NavSection.COMPETITIONS  -> CompetitionsScreen(viewModel) { selectedMatch = it }
                         NavSection.SEARCH        -> SearchScreen(viewModel) { selectedMatch = it }
                         NavSection.PROFILE       -> ProfileScreen(viewModel)

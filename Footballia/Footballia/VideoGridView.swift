@@ -18,6 +18,12 @@ struct VideoGridView: View {
         isReversed ? matches.reversed() : matches
     }
 
+    #if os(tvOS)
+    @FocusState private var focusedID: String?
+    @State private var rowLastFocus: [Int: String] = [:]
+    @State private var columnCount: Int = 7  // refined at render time via GeometryReader
+    #endif
+
     var body: some View {
         #if os(tvOS)
         tvBody
@@ -52,6 +58,15 @@ struct VideoGridView: View {
                     .padding(.horizontal, 100)
                     .padding(.top, 30)
 
+                    // Geometry probe to determine column count for row-memory tracking
+                    GeometryReader { geo in
+                        Color.clear.onAppear {
+                            let w = geo.size.width
+                            columnCount = max(1, Int((w + 16) / (230 + 16)))
+                        }
+                    }
+                    .frame(height: 0)
+
                     ZStack(alignment: .center) {
                         LazyVGrid(columns: columns, spacing: 16) {
                             ForEach(displayedMatches) { match in
@@ -59,6 +74,7 @@ struct VideoGridView: View {
                                     VideoCardView(match: match)
                                 }
                                 .buttonStyle(.plain)
+                                .focused($focusedID, equals: match.id)
                                 .focusEffectDisabled()
                             }
                         }
@@ -76,6 +92,12 @@ struct VideoGridView: View {
                 }
             }
             .scrollIndicators(.hidden)
+            .onChange(of: focusedID) { _, newID in
+                applyRowMemory(focusedID: newID)
+            }
+            .onChange(of: displayedMatches) { _, _ in
+                rowLastFocus = [:]
+            }
 
             // Vertically-elongated page navigation arrows pinned to left/right edges
             HStack {
@@ -104,6 +126,26 @@ struct VideoGridView: View {
             .padding(.horizontal, 12)
             .allowsHitTesting(!isLoading)
         }
+    }
+
+    private func applyRowMemory(focusedID newID: String?) {
+        guard let newID,
+              let newIdx = displayedMatches.firstIndex(where: { $0.id == newID })
+        else { return }
+
+        let newRow = newIdx / max(1, columnCount)
+
+        // If we have a remembered position for this row and it differs from where
+        // the focus engine landed, redirect focus to the remembered position.
+        if let remembered = rowLastFocus[newRow],
+           remembered != newID,
+           displayedMatches.contains(where: { $0.id == remembered }) {
+            focusedID = remembered
+            return
+        }
+
+        // Record this as the current column for the row.
+        rowLastFocus[newRow] = newID
     }
     #endif
 
