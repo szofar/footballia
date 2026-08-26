@@ -1,0 +1,24 @@
+# macOS
+.DS_Store
+
+# Xcode — user-specific state (not shared)
+xcuserdata/
+*.xcuserstate
+
+# Xcode build output
+build/
+DerivedData/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Xcode build products checked out under the project
+Footballia/Products/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Note: android/ has its own .gitignore
